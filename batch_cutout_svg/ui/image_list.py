@@ -16,6 +16,7 @@ class ImageListPanel(ttk.Frame):
     ) -> None:
         super().__init__(master)
         self.on_select = on_select
+        self._suppress_selection_callback = False
 
         ttk.Label(self, text="图片列表").pack(anchor="w", padx=8, pady=(8, 4))
         columns = ("regions", "exported")
@@ -38,6 +39,7 @@ class ImageListPanel(ttk.Frame):
         self.tree.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=(0, 8))
         scrollbar.pack(side="right", fill="y", padx=(0, 8), pady=(0, 8))
 
+        self.tree.bind("<Button-1>", self._handle_click)
         self.tree.bind("<<TreeviewSelect>>", self._handle_select)
 
     def set_images(self, items: list[ImageItem]) -> None:
@@ -55,11 +57,21 @@ class ImageListPanel(ttk.Frame):
                 values=(str(len(item.regions)), marker),
             )
         if current_selection and str(current_selection) in self.tree.get_children():
-            self.tree.selection_set(str(current_selection))
+            self.select_path(current_selection, notify=False)
 
-    def select_path(self, path: Path) -> None:
+    def select_path(self, path: Path, notify: bool = True) -> None:
         iid = str(path)
-        if iid in self.tree.get_children():
+        if iid not in self.tree.get_children():
+            return
+        if not notify:
+            self._suppress_selection_callback = True
+            try:
+                self.tree.selection_set(iid)
+                self.tree.focus(iid)
+                self.tree.see(iid)
+            finally:
+                self.after_idle(self._clear_selection_suppression)
+        else:
             self.tree.selection_set(iid)
             self.tree.focus(iid)
             self.tree.see(iid)
@@ -71,7 +83,16 @@ class ImageListPanel(ttk.Frame):
         return Path(selection[0])
 
     def _handle_select(self, _event: tk.Event) -> None:
+        if self._suppress_selection_callback:
+            self._clear_selection_suppression()
+            return
         selected = self.selected_path()
         if selected is not None:
             self.on_select(selected)
+
+    def _handle_click(self, _event: tk.Event) -> None:
+        self._clear_selection_suppression()
+
+    def _clear_selection_suppression(self) -> None:
+        self._suppress_selection_callback = False
 

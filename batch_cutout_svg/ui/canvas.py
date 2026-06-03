@@ -20,6 +20,9 @@ TOOL_SELECT = "select"
 TOOL_RECT = "rect"
 TOOL_ELLIPSE = "ellipse"
 TOOL_FREEHAND = "freehand"
+MIN_EFFECTIVE_CANVAS_SIZE = 20
+MIN_ZOOM = 0.01
+MAX_PREVIEW_SIDE = 2400
 
 
 class CanvasView(ttk.Frame):
@@ -43,14 +46,18 @@ class CanvasView(ttk.Frame):
         self.offset_x = 0.0
         self.offset_y = 0.0
         self._tk_image: ImageTk.PhotoImage | None = None
+        self._preview_cache_key: tuple[int, int, int] | None = None
+        self._preview_cache_image: Image.Image | None = None
         self._drawing_start: Point | None = None
         self._current_point: Point | None = None
         self._freehand_points: list[Point] = []
         self._panning = False
         self._last_pan: tuple[int, int] | None = None
         self._space_down = False
+        self._fit_when_ready = False
+        self._last_canvas_size: tuple[int, int] = (0, 0)
 
-        self.canvas.bind("<Configure>", lambda _event: self.redraw())
+        self.canvas.bind("<Configure>", self._handle_configure)
         self.canvas.bind("<Enter>", lambda _event: self.canvas.focus_set())
         self.canvas.bind("<ButtonPress-1>", self._left_down)
         self.canvas.bind("<B1-Motion>", self._left_drag)
@@ -67,10 +74,17 @@ class CanvasView(ttk.Frame):
     def set_image_item(self, image_item: ImageItem | None) -> None:
         self.image_item = image_item
         self.selected_region_id = None
+        self._preview_cache_key = None
+        self._preview_cache_image = None
         self._reset_drawing()
         if image_item is not None:
-            self.after_idle(self.fit_to_window)
+            self._fit_when_ready = True
+            if self._current_canvas_size_is_effective():
+                self.fit_to_window()
+            else:
+                self.redraw()
         else:
+            self._fit_when_ready = False
             self.redraw()
 
     def set_tool(self, tool: str) -> None:
@@ -79,19 +93,24 @@ class CanvasView(ttk.Frame):
         self.redraw()
 
     def set_selected_region(self, region_id: str | None) -> None:
+        if self.selected_region_id == region_id:
+            return
         self.selected_region_id = region_id
         self.redraw()
 
     def fit_to_window(self) -> None:
         if self.image_item is None:
             return
-        canvas_width = max(1, self.canvas.winfo_width())
-        canvas_height = max(1, self.canvas.winfo_height())
+        canvas_width, canvas_height = self._canvas_size()
+        if not self._canvas_size_is_effective(canvas_width, canvas_height):
+            self._fit_when_ready = True
+            return
         image = self.image_item.image
         self.zoom = min(canvas_width / image.width, canvas_height / image.height) * 0.92
-        self.zoom = max(0.05, min(self.zoom, 8.0))
+        self.zoom = self._clamp_zoom(self.zoom)
         self.offset_x = (canvas_width - image.width * self.zoom) / 2
         self.offset_y = (canvas_height - image.height * self.zoom) / 2
+        self._fit_when_ready = False
         self.redraw()
 
     def redraw(self) -> None:
@@ -106,10 +125,24 @@ class CanvasView(ttk.Frame):
             return
 
         image = self.image_item.image
+        self.zoom = self._clamp_zoom(self.zoom)
         scaled_width = max(1, int(image.width * self.zoom))
         scaled_height = max(1, int(image.height * self.zoom))
-        resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
-        scaled = image.resize((scaled_width, scaled_height), resampling)
+        max_side = max(scaled_width, scaled_height)
+        if max_side > MAX_PREVIEW_SIDE:
+            factor = MAX_PREVIEW_SIDE / max_side
+            self.zoom = self._clamp_zoom(self.zoom * factor)
+            scaled_width = max(1, int(image.width * self.zoom))
+            scaled_height = max(1, int(image.height * self.zoom))
+
+        cache_key = (id(image), scaled_width, scaled_height)
+        if self._preview_cache_key == cache_key and self._preview_cache_image is not None:
+            scaled = self._preview_cache_image
+        else:
+            resampling = getattr(getattr(Image, "Resampling", Image), "BILINEAR")
+            scaled = image.resize((scaled_width, scaled_height), resampling)
+            self._preview_cache_key = cache_key
+            self._preview_cache_image = scaled
         self._tk_image = ImageTk.PhotoImage(scaled)
         self.canvas.create_image(
             self.offset_x,
@@ -252,7 +285,7 @@ class CanvasView(ttk.Frame):
         if self.image_item is None:
             return
         image_point = self.canvas_to_image(canvas_x, canvas_y)
-        self.zoom = max(0.05, min(self.zoom * factor, 16.0))
+        self.zoom = self._clamp_zoom(self.zoom * factor)
         self.offset_x = canvas_x - image_point[0] * self.zoom
         self.offset_y = canvas_y - image_point[1] * self.zoom
         self.redraw()
@@ -280,6 +313,40 @@ class CanvasView(ttk.Frame):
     def _end_pan(self) -> None:
         self._panning = False
         self._last_pan = None
+
+    def _handle_configure(self, event: tk.Event) -> None:
+        new_size = (int(event.width), int(event.height))
+        if new_size == self._last_canvas_size:
+            return
+        self._last_canvas_size = new_size
+        if self.image_item is None:
+            self.redraw()
+            return
+        if not self._canvas_size_is_effective(*new_size):
+            self._fit_when_ready = True
+            return
+        if self._fit_when_ready:
+            self.fit_to_window()
+        else:
+            self.redraw()
+
+    def _canvas_size(self) -> tuple[int, int]:
+        return int(self.canvas.winfo_width()), int(self.canvas.winfo_height())
+
+    def _current_canvas_size_is_effective(self) -> bool:
+        return self._canvas_size_is_effective(*self._canvas_size())
+
+    @staticmethod
+    def _canvas_size_is_effective(width: int, height: int) -> bool:
+        return width >= MIN_EFFECTIVE_CANVAS_SIZE and height >= MIN_EFFECTIVE_CANVAS_SIZE
+
+    def _clamp_zoom(self, value: float) -> float:
+        max_zoom = 16.0
+        if self.image_item is not None:
+            image = self.image_item.image
+            max_zoom = min(max_zoom, MAX_PREVIEW_SIDE / max(image.width, image.height))
+        min_zoom = min(MIN_ZOOM, max_zoom)
+        return max(min_zoom, min(value, max_zoom))
 
     def _commit_shape(self) -> None:
         if self._drawing_start is None or self._current_point is None:

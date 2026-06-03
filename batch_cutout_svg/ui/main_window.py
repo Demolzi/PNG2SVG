@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import traceback
 import tkinter as tk
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+from typing import Callable
 
 from batch_cutout_svg.core.exporter import export_all
 from batch_cutout_svg.core.geometry import Point, validate_polygon
-from batch_cutout_svg.core.image_loader import discover_images_in_folder, load_images
+from batch_cutout_svg.core.image_loader import discover_images_in_folder, load_images_with_report
 from batch_cutout_svg.models import ImageItem, Region
 from batch_cutout_svg.models.region import next_region_id
 from batch_cutout_svg.ui.canvas import (
@@ -18,6 +21,15 @@ from batch_cutout_svg.ui.canvas import (
 )
 from batch_cutout_svg.ui.image_list import ImageListPanel
 from batch_cutout_svg.ui.region_panel import RegionPanel
+
+IMPORT_DEBUG_LOG = Path("import_debug.log")
+APP_ERRORS_LOG = Path("app_errors.log")
+IMAGE_FILETYPES = (
+    ("图片文件", ("*.png", "*.PNG", "*.jpg", "*.JPG", "*.jpeg", "*.JPEG")),
+    ("PNG", ("*.png", "*.PNG")),
+    ("JPEG", ("*.jpg", "*.JPG", "*.jpeg", "*.JPEG")),
+    ("所有文件", "*.*"),
+)
 
 
 class MainWindow(tk.Tk):
@@ -36,6 +48,7 @@ class MainWindow(tk.Tk):
         self._build_toolbar()
         self._build_layout()
         self._build_statusbar()
+        self.bind("<Escape>", lambda _event: self.select_region(None))
 
     def _build_toolbar(self) -> None:
         toolbar = ttk.Frame(self, padding=(8, 6))
@@ -89,55 +102,93 @@ class MainWindow(tk.Tk):
         status.pack(side="bottom", fill="x")
 
     def import_images(self) -> None:
-        paths = filedialog.askopenfilenames(
+        raw_paths = filedialog.askopenfilenames(
             title="选择图片",
-            filetypes=(
-                ("图片文件", "*.png *.jpg *.jpeg"),
-                ("PNG", "*.png"),
-                ("JPEG", "*.jpg *.jpeg"),
-            ),
+            filetypes=IMAGE_FILETYPES,
         )
+        paths = _coerce_dialog_paths(raw_paths, self.tk.splitlist)
+        self._log_import(f"dialog selected {len(paths)} path(s):\n{paths!r}")
         if not paths:
             return
-        self._load_paths([Path(path) for path in paths])
+        self._load_paths(paths)
 
     def import_folder(self) -> None:
         folder = filedialog.askdirectory(title="选择图片文件夹")
         if not folder:
             return
-        paths = discover_images_in_folder(folder)
+        try:
+            paths = discover_images_in_folder(folder)
+            self._log_import(f"folder selected: {folder!r}\ndiscovered {len(paths)} image path(s)")
+        except Exception as exc:  # noqa: BLE001 - show folder access errors to user.
+            self._log_import(f"folder import failed: {folder!r}\n{exc}")
+            messagebox.showerror("导入失败", str(exc))
+            return
         if not paths:
             messagebox.showinfo("没有图片", "所选文件夹中没有 png/jpg/jpeg 图片。")
             return
         self._load_paths(paths)
 
     def _load_paths(self, paths: list[Path]) -> None:
-        existing = {item.path.resolve() for item in self.images}
-        new_paths = [path for path in paths if path.resolve() not in existing]
+        self._log_import(f"_load_paths received {len(paths)} path(s):\n{paths!r}")
+        existing = {self._path_key(item.path) for item in self.images}
+        new_paths = [path for path in paths if self._path_key(path) not in existing]
+        self._log_import(f"new paths after de-dupe {len(new_paths)}:\n{new_paths!r}")
         if not new_paths:
             self.status_var.set("选中的图片已经在列表中。")
             return
-        try:
-            loaded = load_images(new_paths)
-        except Exception as exc:  # noqa: BLE001 - show file-dialog errors to user.
-            messagebox.showerror("导入失败", str(exc))
+        result = load_images_with_report(new_paths)
+        self._log_import(
+            "loaded "
+            f"{len(result.items)} image(s), failures {len(result.failures)}: "
+            f"{[(failure.path, failure.reason) for failure in result.failures]!r}"
+        )
+        if not result.items:
+            details = self._format_load_failures(result.failures)
+            messagebox.showerror("导入失败", details or "没有可导入的图片。")
+            self.status_var.set("图片导入失败。")
             return
+        loaded = result.items
+        self._log_import("before extend images")
         self.images.extend(loaded)
+        self._log_import("after extend images")
+        self._log_import("before image_list.set_images")
         self.image_list.set_images(self.images)
+        self._log_import("after image_list.set_images")
         if loaded:
-            self.select_image(loaded[0].path)
-            self.image_list.select_path(loaded[0].path)
-        self.status_var.set(f"已导入 {len(loaded)} 张图片。")
+            first_path = loaded[0].path
+            self._log_import(f"before image_list.select_path: {first_path}")
+            self.image_list.select_path(first_path, notify=False)
+            self._log_import("after image_list.select_path")
+            self.status_var.set("图片已读取，正在准备预览...")
+            self._log_import(f"before delayed select_image schedule: {first_path}")
+            self.after(10, lambda path=first_path: self.select_image(path))
+            self._log_import("after delayed select_image schedule")
+        if result.failures:
+            details = self._format_load_failures(result.failures)
+            messagebox.showwarning(
+                "部分图片导入失败",
+                f"成功导入 {len(loaded)} 张，失败 {len(result.failures)} 张。\n\n{details}",
+            )
+            self.status_var.set(f"已导入 {len(loaded)} 张图片，{len(result.failures)} 张失败。")
+        elif not loaded:
+            self.status_var.set(f"已导入 {len(loaded)} 张图片。")
 
     def select_image(self, path: Path) -> None:
+        self._log_import(f"select_image start: {path}")
         image = next((item for item in self.images if item.path == path), None)
         if image is None:
+            self._log_import("select_image image not found")
             return
         self.current_image = image
         self.selected_region_id = None
+        self._log_import("before canvas_view.set_image_item")
         self.canvas_view.set_image_item(image)
+        self._log_import("after canvas_view.set_image_item")
+        self._log_import("before region_panel.set_regions")
         self.region_panel.set_regions(image.regions, None)
+        self._log_import("after region_panel.set_regions")
         self._update_status()
+        self._log_import("select_image done")
 
     def add_drawn_region(self, shape_type: str, data: dict, points: list[Point]) -> bool:
         if self.current_image is None:
@@ -193,12 +244,16 @@ class MainWindow(tk.Tk):
         self._refresh_regions()
 
     def delete_selected_region(self) -> None:
-        if self.current_image is None or self.selected_region_id is None:
+        if self.current_image is None:
+            return
+        region_id = self.selected_region_id or self.region_panel.selected_region_id()
+        if region_id is None:
+            self.status_var.set("请先选择要删除的区域。")
             return
         self.current_image.regions = [
             region
             for region in self.current_image.regions
-            if region.id != self.selected_region_id
+            if region.id != region_id
         ]
         self.selected_region_id = None
         self._refresh_regions()
@@ -257,7 +312,11 @@ class MainWindow(tk.Tk):
         self.status_var.set(f"当前工具: {self._tool_label(self.tool_var.get())}")
 
     def _selected_region(self) -> Region | None:
-        if self.current_image is None or self.selected_region_id is None:
+        if self.current_image is None:
+            return None
+        if self.selected_region_id is None:
+            self.selected_region_id = self.region_panel.selected_region_id()
+        if self.selected_region_id is None:
             return None
         return next(
             (region for region in self.current_image.regions if region.id == self.selected_region_id),
@@ -285,6 +344,21 @@ class MainWindow(tk.Tk):
             f"区域 {len(self.current_image.regions)} 个{selected}"
         )
 
+    def report_callback_exception(self, exc_type: type[BaseException], exc: BaseException, tb) -> None:
+        details = "".join(traceback.format_exception(exc_type, exc, tb))
+        _append_log(APP_ERRORS_LOG, f"Tk callback exception:\n{details}")
+        try:
+            messagebox.showerror(
+                "程序错误",
+                f"界面回调发生异常，详情已写入 {APP_ERRORS_LOG}。\n\n{exc}",
+            )
+        except tk.TclError:
+            pass
+
+    @staticmethod
+    def _log_import(message: str) -> None:
+        _append_log(IMPORT_DEBUG_LOG, message)
+
     @staticmethod
     def _tool_label(tool: str) -> str:
         return {
@@ -293,4 +367,56 @@ class MainWindow(tk.Tk):
             TOOL_ELLIPSE: "椭圆",
             TOOL_FREEHAND: "自由曲线",
         }.get(tool, tool)
+
+    @staticmethod
+    def _path_key(path: Path) -> str:
+        try:
+            return str(path.resolve()).lower()
+        except OSError:
+            return str(path.absolute()).lower()
+
+    @staticmethod
+    def _format_load_failures(failures: list) -> str:
+        if not failures:
+            return ""
+        lines = [
+            f"{failure.path}: {failure.reason}"
+            for failure in failures[:8]
+        ]
+        if len(failures) > 8:
+            lines.append(f"... 还有 {len(failures) - 8} 项失败")
+        return "\n".join(lines)
+
+
+def _coerce_dialog_paths(
+    raw_paths: object,
+    splitlist: Callable[[str], tuple[str, ...]] | None = None,
+) -> list[Path]:
+    if not raw_paths:
+        return []
+    if isinstance(raw_paths, str):
+        values = splitlist(raw_paths) if splitlist is not None else (raw_paths,)
+    else:
+        values = raw_paths
+    return [
+        _absolute_path(Path(str(value)))
+        for value in values
+        if str(value).strip()
+    ]
+
+
+def _absolute_path(path: Path) -> Path:
+    try:
+        return path.expanduser().resolve(strict=False)
+    except OSError:
+        return path.expanduser().absolute()
+
+
+def _append_log(path: Path, message: str) -> None:
+    try:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(f"[{timestamp}] {message}\n\n")
+    except OSError:
+        pass
 

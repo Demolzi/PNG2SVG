@@ -15,8 +15,10 @@ from batch_cutout_svg.core.geometry import (
     rect_to_points,
     validate_polygon,
 )
+from batch_cutout_svg.core.image_loader import discover_images_in_folder, load_images_with_report
 from batch_cutout_svg.core.mask import CutoutOptions, create_cutout_png
 from batch_cutout_svg.core.naming import sanitize_filename_part, unique_path
+from batch_cutout_svg.ui.main_window import _coerce_dialog_paths
 from batch_cutout_svg.models import ImageItem, Region
 
 
@@ -68,6 +70,55 @@ class NamingTests(unittest.TestCase):
             path = tmp / "item.svg"
             path.write_text("x", encoding="utf-8")
             self.assertEqual(unique_path(path).name, "item_copy1.svg")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class ImageLoaderTests(unittest.TestCase):
+    def test_file_dialog_tuple_paths_are_normalized(self) -> None:
+        paths = _coerce_dialog_paths(("a.png", "b.JPG"))
+
+        self.assertEqual([path.name for path in paths], ["a.png", "b.JPG"])
+        self.assertTrue(all(path.is_absolute() for path in paths))
+
+    def test_file_dialog_string_paths_use_tk_splitter(self) -> None:
+        paths = _coerce_dialog_paths("a.png b.jpeg", lambda value: tuple(value.split()))
+
+        self.assertEqual([path.name for path in paths], ["a.png", "b.jpeg"])
+
+    def test_load_images_with_report_keeps_successful_images(self) -> None:
+        tmp = make_test_dir()
+        try:
+            good = tmp / "good.png"
+            bad = tmp / "bad.jpg"
+            Image.new("RGB", (4, 4), (10, 20, 30)).save(good)
+            bad.write_text("not an image", encoding="utf-8")
+
+            result = load_images_with_report([good, bad])
+
+            self.assertEqual(len(result.items), 1)
+            self.assertEqual(result.items[0].path, good)
+            self.assertEqual(result.items[0].image.mode, "RGBA")
+            self.assertEqual(len(result.failures), 1)
+            self.assertEqual(result.failures[0].path, bad)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_discover_images_in_folder_finds_supported_images_only(self) -> None:
+        tmp = make_test_dir()
+        try:
+            nested = tmp / "nested"
+            nested.mkdir()
+            first = tmp / "a.png"
+            second = nested / "b.jpeg"
+            ignored = nested / "notes.txt"
+            Image.new("RGB", (2, 2)).save(first)
+            Image.new("RGB", (2, 2)).save(second)
+            ignored.write_text("x", encoding="utf-8")
+
+            found = discover_images_in_folder(tmp)
+
+            self.assertEqual(found, sorted([first, second], key=lambda item: str(item).lower()))
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

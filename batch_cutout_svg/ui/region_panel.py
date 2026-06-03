@@ -12,7 +12,7 @@ class RegionPanel(ttk.Frame):
     def __init__(
         self,
         master: tk.Misc,
-        on_select: Callable[[str], None],
+        on_select: Callable[[str | None], None],
         on_rename: Callable[[str], None],
         on_toggle_visible: Callable[[], None],
         on_delete: Callable[[], None],
@@ -26,6 +26,8 @@ class RegionPanel(ttk.Frame):
         self.on_delete = on_delete
         self.on_browse_output = on_browse_output
         self.on_export = on_export
+        self._updating_tree = False
+        self._suppress_selection_callback = False
 
         self.name_var = tk.StringVar()
         self.output_dir_var = tk.StringVar()
@@ -54,6 +56,8 @@ class RegionPanel(ttk.Frame):
             self.tree.heading(column, text=label)
             self.tree.column(column, width=width, anchor="center", stretch=column == "name")
         self.tree.pack(fill="both", expand=True, padx=8)
+        self.tree.bind("<Button-1>", self._handle_click)
+        self.tree.bind("<ButtonRelease-1>", self._handle_release)
         self.tree.bind("<<TreeviewSelect>>", self._handle_select)
 
         form = ttk.Frame(self)
@@ -63,8 +67,9 @@ class RegionPanel(ttk.Frame):
         name_entry.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(2, 6))
         form.columnconfigure(0, weight=1)
         ttk.Button(form, text="重命名", command=self._rename).grid(row=1, column=2, padx=(6, 0), sticky="ew")
-        ttk.Button(form, text="显示/隐藏", command=self.on_toggle_visible).grid(row=2, column=0, sticky="ew")
-        ttk.Button(form, text="删除区域", command=self.on_delete).grid(row=2, column=1, columnspan=2, padx=(6, 0), sticky="ew")
+        ttk.Button(form, text="取消选择", command=self.clear_selection).grid(row=2, column=0, sticky="ew")
+        ttk.Button(form, text="显示/隐藏", command=self.on_toggle_visible).grid(row=2, column=1, padx=(6, 0), sticky="ew")
+        ttk.Button(form, text="删除区域", command=self.on_delete).grid(row=2, column=2, padx=(6, 0), sticky="ew")
 
         settings = ttk.LabelFrame(self, text="导出设置")
         settings.pack(fill="x", padx=8, pady=(0, 8))
@@ -144,27 +149,41 @@ class RegionPanel(ttk.Frame):
         self.progress.pack(fill="x", padx=8, pady=(0, 8))
 
     def set_regions(self, regions: list[Region], selected_region_id: str | None) -> None:
-        for iid in self.tree.get_children():
-            self.tree.delete(iid)
-        for index, region in enumerate(regions, start=1):
-            self.tree.insert(
-                "",
-                "end",
-                iid=region.id,
-                values=(
-                    f"{index}. {region.display_name}",
-                    region.shape_label,
-                    "是" if region.visible else "否",
-                    "合法" if region.is_valid else "非法",
-                ),
-            )
-        if selected_region_id and selected_region_id in self.tree.get_children():
-            self.tree.selection_set(selected_region_id)
-            self.tree.focus(selected_region_id)
-            region = next((item for item in regions if item.id == selected_region_id), None)
-            self.name_var.set(region.display_name if region else "")
-        else:
-            self.name_var.set("")
+        self._updating_tree = True
+        self._suppress_selection_callback = True
+        try:
+            for iid in self.tree.get_children():
+                self.tree.delete(iid)
+            for index, region in enumerate(regions, start=1):
+                self.tree.insert(
+                    "",
+                    "end",
+                    iid=region.id,
+                    values=(
+                        f"{index}. {region.display_name}",
+                        region.shape_label,
+                        "是" if region.visible else "否",
+                        "合法" if region.is_valid else "非法",
+                    ),
+                )
+            if selected_region_id and selected_region_id in self.tree.get_children():
+                self.tree.selection_set(selected_region_id)
+                self.tree.focus(selected_region_id)
+                region = next((item for item in regions if item.id == selected_region_id), None)
+                self.name_var.set(region.display_name if region else "")
+            else:
+                self.tree.selection_remove(self.tree.selection())
+                self.tree.focus("")
+                self.name_var.set("")
+        finally:
+            self._updating_tree = False
+            self.after_idle(self._clear_selection_suppression)
+
+    def clear_selection(self) -> None:
+        self.tree.selection_remove(self.tree.selection())
+        self.tree.focus("")
+        self.name_var.set("")
+        self.on_select(None)
 
     def selected_region_id(self) -> str | None:
         selection = self.tree.selection()
@@ -195,10 +214,31 @@ class RegionPanel(ttk.Frame):
     def set_progress(self, current: int, total: int) -> None:
         self.progress.configure(maximum=max(1, total), value=current)
 
+    def _handle_click(self, event: tk.Event) -> str | None:
+        region = self.tree.identify_region(event.x, event.y)
+        row_id = self.tree.identify_row(event.y)
+        if region not in {"cell", "tree"}:
+            return None
+        if not row_id:
+            self.clear_selection()
+            return "break"
+        return None
+
+    def _handle_release(self, event: tk.Event) -> None:
+        if self._updating_tree or self._suppress_selection_callback:
+            return
+        row_id = self.tree.identify_row(event.y)
+        if row_id and row_id in self.tree.selection():
+            self.on_select(row_id)
+
     def _handle_select(self, _event: tk.Event) -> None:
+        if self._updating_tree or self._suppress_selection_callback:
+            return
         region_id = self.selected_region_id()
-        if region_id:
-            self.on_select(region_id)
+        self.on_select(region_id)
+
+    def _clear_selection_suppression(self) -> None:
+        self._suppress_selection_callback = False
 
     def _rename(self) -> None:
         self.on_rename(self.name_var.get().strip())

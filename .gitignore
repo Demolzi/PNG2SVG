@@ -2,8 +2,9 @@
 .tmp/
 __pycache__/
 *.pyc
+import_debug.log
+app_errors.log
 output/
 build/
 dist/
 *.spec
-
