@@ -4,9 +4,10 @@ import base64
 import shutil
 import unittest
 import uuid
+from io import BytesIO
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from batch_cutout_svg.core.exporter import export_region_as_svg
 from batch_cutout_svg.core.geometry import (
@@ -14,7 +15,7 @@ from batch_cutout_svg.core.geometry import (
     rect_to_points,
     validate_polygon,
 )
-from batch_cutout_svg.core.mask import create_cutout_png
+from batch_cutout_svg.core.mask import CutoutOptions, create_cutout_png
 from batch_cutout_svg.core.naming import sanitize_filename_part, unique_path
 from batch_cutout_svg.models import ImageItem, Region
 
@@ -79,24 +80,106 @@ class MaskAndExporterTests(unittest.TestCase):
         self.assertEqual(cutout.size, (10, 10))
         self.assertEqual(cutout.getpixel((5, 5))[3], 255)
 
+    def test_boundary_connected_white_background_becomes_transparent(self) -> None:
+        image = Image.new("RGBA", (20, 20), (255, 255, 255, 255))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((6, 6, 13, 13), fill=(20, 20, 20, 255))
+
+        cutout = create_cutout_png(
+            image,
+            rect_to_points(0, 0, 20, 20),
+            options=CutoutOptions(feather_radius=0, remove_small_components=False),
+        )
+
+        self.assertEqual(cutout.getpixel((0, 0))[3], 0)
+        self.assertEqual(cutout.getpixel((10, 10))[3], 255)
+
+    def test_feather_does_not_leak_alpha_outside_user_region(self) -> None:
+        image = Image.new("RGBA", (20, 20), (200, 0, 0, 255))
+
+        cutout = create_cutout_png(
+            image,
+            [(0, 0), (20, 0), (0, 20)],
+            options=CutoutOptions(feather_radius=2, remove_small_components=False),
+        )
+
+        self.assertEqual(cutout.getpixel((19, 19))[3], 0)
+
+    def test_boundary_fill_preserves_enclosed_white_detail(self) -> None:
+        image = Image.new("RGBA", (24, 24), (255, 255, 255, 255))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((5, 5, 18, 18), fill=(15, 15, 15, 255))
+        draw.rectangle((10, 10, 13, 13), fill=(255, 255, 255, 255))
+
+        cutout = create_cutout_png(
+            image,
+            rect_to_points(0, 0, 24, 24),
+            options=CutoutOptions(feather_radius=0, remove_small_components=False),
+        )
+
+        self.assertEqual(cutout.getpixel((1, 1))[3], 0)
+        self.assertEqual(cutout.getpixel((11, 11))[3], 255)
+
+    def test_small_isolated_foreground_component_is_removed(self) -> None:
+        image = Image.new("RGBA", (24, 24), (255, 255, 255, 255))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((6, 6, 13, 13), fill=(20, 20, 20, 255))
+        draw.point((20, 20), fill=(200, 0, 0, 255))
+
+        cutout = create_cutout_png(
+            image,
+            rect_to_points(0, 0, 24, 24),
+            options=CutoutOptions(
+                feather_radius=0,
+                remove_small_components=True,
+                min_component_area=4,
+            ),
+        )
+
+        self.assertEqual(cutout.getpixel((10, 10))[3], 255)
+        self.assertEqual(cutout.getpixel((20, 20))[3], 0)
+
+    def test_keep_largest_component_removes_other_foreground(self) -> None:
+        image = Image.new("RGBA", (30, 20), (255, 255, 255, 255))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((3, 3, 12, 12), fill=(20, 20, 20, 255))
+        draw.rectangle((22, 7, 25, 10), fill=(0, 80, 200, 255))
+
+        cutout = create_cutout_png(
+            image,
+            rect_to_points(0, 0, 30, 20),
+            options=CutoutOptions(
+                feather_radius=0,
+                remove_small_components=False,
+                keep_largest_component=True,
+            ),
+        )
+
+        self.assertEqual(cutout.getpixel((8, 8))[3], 255)
+        self.assertEqual(cutout.getpixel((23, 8))[3], 0)
+
     def test_export_svg_embeds_png(self) -> None:
         tmp = make_test_dir()
         try:
-            image = Image.new("RGBA", (20, 20), (0, 128, 255, 255))
+            image = Image.new("RGBA", (20, 20), (255, 255, 255, 255))
+            draw = ImageDraw.Draw(image)
+            draw.rectangle((5, 5, 14, 14), fill=(0, 128, 255, 255))
             item = ImageItem(path=Path("sample.png"), image=image)
             region = Region(
                 id="region001",
                 name="part",
                 shape_type="rect",
                 data={},
-                polygon_points=rect_to_points(2, 3, 8, 9),
+                polygon_points=rect_to_points(0, 0, 20, 20),
             )
             output = export_region_as_svg(item, region, tmp / "out.svg", feather_radius=0)
             text = output.read_text(encoding="utf-8")
             self.assertIn("<svg", text)
             self.assertIn("data:image/png;base64,", text)
             encoded = text.split("data:image/png;base64,", 1)[1].split('"', 1)[0]
-            self.assertGreater(len(base64.b64decode(encoded)), 0)
+            embedded = Image.open(BytesIO(base64.b64decode(encoded))).convert("RGBA")
+            self.assertEqual(embedded.getpixel((0, 0))[3], 0)
+            self.assertEqual(embedded.getpixel((10, 10))[3], 255)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

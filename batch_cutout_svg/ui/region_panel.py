@@ -4,6 +4,7 @@ import tkinter as tk
 from tkinter import ttk
 from typing import Callable
 
+from batch_cutout_svg.core.mask import CutoutOptions
 from batch_cutout_svg.models import Region
 
 
@@ -29,6 +30,11 @@ class RegionPanel(ttk.Frame):
         self.name_var = tk.StringVar()
         self.output_dir_var = tk.StringVar()
         self.feather_var = tk.DoubleVar(value=1.5)
+        self.white_threshold_var = tk.IntVar(value=240)
+        self.near_white_tolerance_var = tk.IntVar(value=15)
+        self.remove_small_components_var = tk.BooleanVar(value=True)
+        self.min_component_area_var = tk.IntVar(value=20)
+        self.keep_largest_component_var = tk.BooleanVar(value=False)
 
         ttk.Label(self, text="区域列表").pack(anchor="w", padx=8, pady=(8, 4))
         columns = ("name", "type", "visible", "status")
@@ -86,14 +92,53 @@ class RegionPanel(ttk.Frame):
             textvariable=self.feather_var,
             width=8,
         ).grid(row=3, column=0, sticky="w", padx=8, pady=(2, 8))
+        ttk.Label(settings, text="白底阈值").grid(row=2, column=1, sticky="w", padx=8)
+        ttk.Spinbox(
+            settings,
+            from_=0,
+            to=255,
+            increment=1,
+            textvariable=self.white_threshold_var,
+            width=8,
+        ).grid(row=3, column=1, sticky="w", padx=8, pady=(2, 8))
+        ttk.Label(settings, text="近白容差").grid(row=4, column=0, sticky="w", padx=8)
+        ttk.Spinbox(
+            settings,
+            from_=0,
+            to=255,
+            increment=1,
+            textvariable=self.near_white_tolerance_var,
+            width=8,
+        ).grid(row=5, column=0, sticky="w", padx=8, pady=(2, 8))
+        ttk.Label(settings, text="最小噪点面积").grid(row=4, column=1, sticky="w", padx=8)
+        ttk.Spinbox(
+            settings,
+            from_=1,
+            to=10000,
+            increment=1,
+            textvariable=self.min_component_area_var,
+            width=8,
+        ).grid(row=5, column=1, sticky="w", padx=8, pady=(2, 8))
+        ttk.Checkbutton(
+            settings,
+            text="去除小噪点",
+            variable=self.remove_small_components_var,
+        ).grid(row=6, column=0, sticky="w", padx=8, pady=(0, 4))
+        ttk.Checkbutton(
+            settings,
+            text="只保留最大连通域",
+            variable=self.keep_largest_component_var,
+        ).grid(row=6, column=1, sticky="w", padx=8, pady=(0, 4))
         ttk.Button(settings, text="导出全部 SVG", command=self.on_export).grid(
-            row=3,
-            column=1,
+            row=7,
+            column=0,
+            columnspan=2,
             sticky="ew",
-            padx=(4, 8),
+            padx=8,
             pady=(2, 8),
         )
         settings.columnconfigure(0, weight=1)
+        settings.columnconfigure(1, weight=1)
 
         self.progress = ttk.Progressbar(self, mode="determinate")
         self.progress.pack(fill="x", padx=8, pady=(0, 8))
@@ -131,6 +176,16 @@ class RegionPanel(ttk.Frame):
     def output_dir(self) -> str:
         return self.output_dir_var.get().strip()
 
+    def cutout_options(self) -> CutoutOptions:
+        return CutoutOptions(
+            feather_radius=self.feather_radius(),
+            white_threshold=self._int_value(self.white_threshold_var, 240, 0, 255),
+            near_white_tolerance=self._int_value(self.near_white_tolerance_var, 15, 0, 255),
+            remove_small_components=bool(self.remove_small_components_var.get()),
+            min_component_area=self._int_value(self.min_component_area_var, 20, 1, 10000),
+            keep_largest_component=bool(self.keep_largest_component_var.get()),
+        )
+
     def feather_radius(self) -> float:
         try:
             return max(0.0, float(self.feather_var.get()))
@@ -147,4 +202,17 @@ class RegionPanel(ttk.Frame):
 
     def _rename(self) -> None:
         self.on_rename(self.name_var.get().strip())
+
+    @staticmethod
+    def _int_value(
+        variable: tk.IntVar,
+        fallback: int,
+        minimum: int,
+        maximum: int,
+    ) -> int:
+        try:
+            value = int(variable.get())
+        except (tk.TclError, ValueError):
+            value = fallback
+        return max(minimum, min(maximum, value))
 

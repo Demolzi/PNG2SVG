@@ -233,6 +233,7 @@ class MainWindow(tk.Tk):
             self.images,
             output_dir,
             feather_radius=self.region_panel.feather_radius(),
+            cutout_options=self.region_panel.cutout_options(),
             progress_callback=update_progress,
         )
         self.image_list.set_images(self.images)

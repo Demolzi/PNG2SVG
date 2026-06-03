@@ -9,7 +9,7 @@ from typing import Callable
 
 from batch_cutout_svg.models import ImageItem, Region
 
-from .mask import create_cutout_png
+from .mask import CutoutOptions, create_cutout_png
 from .naming import build_region_export_path
 
 
@@ -39,14 +39,17 @@ def export_region_as_svg(
     region: Region,
     output_path: str | Path,
     feather_radius: float = 1.5,
+    cutout_options: CutoutOptions | None = None,
 ) -> Path:
     if not region.is_valid:
         raise ValueError(region.error_message or "区域非法，无法导出。")
 
+    resolved_options = cutout_options or CutoutOptions(feather_radius=feather_radius)
     cutout = create_cutout_png(
         image_item.image,
         region.polygon_points,
         feather_radius=feather_radius,
+        options=resolved_options,
     )
     buffer = BytesIO()
     cutout.save(buffer, format="PNG")
@@ -73,11 +76,13 @@ def export_all(
     image_items: list[ImageItem],
     output_root: str | Path,
     feather_radius: float = 1.5,
+    cutout_options: CutoutOptions | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> ExportSummary:
     summary = ExportSummary()
     total_regions = sum(len(item.regions) for item in image_items)
     processed = 0
+    resolved_options = cutout_options or CutoutOptions(feather_radius=feather_radius)
 
     for image_item in image_items:
         exported_for_image = 0
@@ -97,6 +102,7 @@ def export_all(
                     region,
                     output_path,
                     feather_radius=feather_radius,
+                    cutout_options=resolved_options,
                 )
                 summary.exported_paths.append(exported)
                 exported_for_image += 1
