@@ -18,7 +18,7 @@ from batch_cutout_svg.core.geometry import (
 from batch_cutout_svg.core.image_loader import discover_images_in_folder, load_images_with_report
 from batch_cutout_svg.core.mask import CutoutOptions, create_cutout_png
 from batch_cutout_svg.core.naming import sanitize_filename_part, unique_path
-from batch_cutout_svg.ui.main_window import _coerce_dialog_paths
+from batch_cutout_svg.ui.main_window import _coerce_dialog_paths, _translate_region
 from batch_cutout_svg.models import ImageItem, Region
 
 
@@ -121,6 +121,37 @@ class ImageLoaderTests(unittest.TestCase):
             self.assertEqual(found, sorted([first, second], key=lambda item: str(item).lower()))
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+class RegionMoveTests(unittest.TestCase):
+    def test_translate_rect_region_updates_polygon_and_data(self) -> None:
+        region = Region(
+            id="region001",
+            name="region001",
+            shape_type="rect",
+            data={"type": "rect", "x": 10.0, "y": 20.0, "width": 30.0, "height": 40.0},
+            polygon_points=rect_to_points(10.0, 20.0, 30.0, 40.0),
+        )
+
+        _translate_region(region, 5.0, -3.0)
+
+        self.assertEqual(region.data["x"], 15.0)
+        self.assertEqual(region.data["y"], 17.0)
+        self.assertEqual(region.polygon_points, rect_to_points(15.0, 17.0, 30.0, 40.0))
+
+    def test_translate_freehand_region_updates_data_points(self) -> None:
+        region = Region(
+            id="region001",
+            name="region001",
+            shape_type="freehand",
+            data={"type": "freehand", "points": [(1.0, 2.0), (3.0, 4.0), (5.0, 2.0)]},
+            polygon_points=[(1.0, 2.0), (3.0, 4.0), (5.0, 2.0)],
+        )
+
+        _translate_region(region, 2.0, 3.0)
+
+        self.assertEqual(region.data["points"], [(3.0, 5.0), (5.0, 7.0), (7.0, 5.0)])
+        self.assertEqual(region.polygon_points, [(3.0, 5.0), (5.0, 7.0), (7.0, 5.0)])
 
 
 class MaskAndExporterTests(unittest.TestCase):

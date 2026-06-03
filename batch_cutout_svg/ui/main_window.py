@@ -15,6 +15,7 @@ from batch_cutout_svg.models.region import next_region_id
 from batch_cutout_svg.ui.canvas import (
     TOOL_ELLIPSE,
     TOOL_FREEHAND,
+    TOOL_HAND,
     TOOL_RECT,
     TOOL_SELECT,
     CanvasView,
@@ -58,6 +59,7 @@ class MainWindow(tk.Tk):
 
         for label, tool in (
             ("选择", TOOL_SELECT),
+            ("手形", TOOL_HAND),
             ("矩形", TOOL_RECT),
             ("椭圆", TOOL_ELLIPSE),
             ("自由曲线", TOOL_FREEHAND),
@@ -82,7 +84,7 @@ class MainWindow(tk.Tk):
         panes.pack(fill="both", expand=True)
 
         self.image_list = ImageListPanel(panes, self.select_image)
-        self.canvas_view = CanvasView(panes, self.add_drawn_region, self.select_region)
+        self.canvas_view = CanvasView(panes, self.add_drawn_region, self.select_region, self.move_region)
         self.region_panel = RegionPanel(
             panes,
             on_select=self.select_region,
@@ -229,6 +231,35 @@ class MainWindow(tk.Tk):
             self.region_panel.set_regions(self.current_image.regions, region_id)
         self._update_status()
 
+    def move_region(self, region_id: str, dx: float, dy: float) -> bool:
+        if self.current_image is None:
+            return False
+        region = next((item for item in self.current_image.regions if item.id == region_id), None)
+        if region is None:
+            return False
+        moved_points = _translate_points(region.polygon_points, dx, dy)
+        existing_polygons = [
+            item.polygon_points
+            for item in self.current_image.regions
+            if item.id != region_id
+        ]
+        validation = validate_polygon(
+            moved_points,
+            self.current_image.width,
+            self.current_image.height,
+            existing_polygons=existing_polygons,
+        )
+        if not validation.is_valid:
+            self.status_var.set(validation.error_message or "区域移动后非法。")
+            return False
+
+        _translate_region(region, dx, dy, moved_points=moved_points)
+        region.is_valid = True
+        region.error_message = None
+        self.selected_region_id = region.id
+        self._update_status()
+        return True
+
     def rename_selected_region(self, name: str) -> None:
         region = self._selected_region()
         if region is None:
@@ -363,6 +394,7 @@ class MainWindow(tk.Tk):
     def _tool_label(tool: str) -> str:
         return {
             TOOL_SELECT: "选择",
+            TOOL_HAND: "手形",
             TOOL_RECT: "矩形",
             TOOL_ELLIPSE: "椭圆",
             TOOL_FREEHAND: "自由曲线",
@@ -410,6 +442,39 @@ def _absolute_path(path: Path) -> Path:
         return path.expanduser().resolve(strict=False)
     except OSError:
         return path.expanduser().absolute()
+
+
+def _translate_region(
+    region: Region,
+    dx: float,
+    dy: float,
+    moved_points: list[Point] | None = None,
+) -> None:
+    region.polygon_points = moved_points if moved_points is not None else _translate_points(
+        region.polygon_points,
+        dx,
+        dy,
+    )
+    _translate_numeric_field(region.data, "x", dx)
+    _translate_numeric_field(region.data, "cx", dx)
+    _translate_numeric_field(region.data, "y", dy)
+    _translate_numeric_field(region.data, "cy", dy)
+    points = region.data.get("points")
+    if points is not None:
+        try:
+            region.data["points"] = [(float(x) + dx, float(y) + dy) for x, y in points]
+        except (TypeError, ValueError):
+            pass
+
+
+def _translate_points(points: list[Point], dx: float, dy: float) -> list[Point]:
+    return [(x + dx, y + dy) for x, y in points]
+
+
+def _translate_numeric_field(data: dict, key: str, delta: float) -> None:
+    value = data.get(key)
+    if isinstance(value, (int, float)):
+        data[key] = value + delta
 
 
 def _append_log(path: Path, message: str) -> None:

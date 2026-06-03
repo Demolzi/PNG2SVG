@@ -17,6 +17,7 @@ from batch_cutout_svg.core.geometry import (
 from batch_cutout_svg.models import ImageItem
 
 TOOL_SELECT = "select"
+TOOL_HAND = "hand"
 TOOL_RECT = "rect"
 TOOL_ELLIPSE = "ellipse"
 TOOL_FREEHAND = "freehand"
@@ -31,10 +32,12 @@ class CanvasView(ttk.Frame):
         master: tk.Misc,
         on_region_drawn: Callable[[str, dict, list[Point]], bool],
         on_region_selected: Callable[[str | None], None],
+        on_region_moved: Callable[[str, float, float], bool],
     ) -> None:
         super().__init__(master)
         self.on_region_drawn = on_region_drawn
         self.on_region_selected = on_region_selected
+        self.on_region_moved = on_region_moved
 
         self.canvas = tk.Canvas(self, background="#f2f4f7", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
@@ -51,6 +54,8 @@ class CanvasView(ttk.Frame):
         self._drawing_start: Point | None = None
         self._current_point: Point | None = None
         self._freehand_points: list[Point] = []
+        self._moving_region_id: str | None = None
+        self._move_last_point: Point | None = None
         self._panning = False
         self._last_pan: tuple[int, int] | None = None
         self._space_down = False
@@ -70,6 +75,7 @@ class CanvasView(ttk.Frame):
         self.canvas.bind("<Button-5>", lambda event: self._zoom_at(event.x, event.y, 0.9))
         self.canvas.bind("<KeyPress-space>", self._space_press)
         self.canvas.bind("<KeyRelease-space>", self._space_release)
+        self._update_cursor()
 
     def set_image_item(self, image_item: ImageItem | None) -> None:
         self.image_item = image_item
@@ -90,6 +96,7 @@ class CanvasView(ttk.Frame):
     def set_tool(self, tool: str) -> None:
         self.tool = tool
         self._reset_drawing()
+        self._update_cursor()
         self.redraw()
 
     def set_selected_region(self, region_id: str | None) -> None:
@@ -232,12 +239,23 @@ class CanvasView(ttk.Frame):
         self.canvas.focus_set()
         if self.image_item is None:
             return
-        if self._space_down:
+        if self._space_down or self.tool == TOOL_HAND:
             self._start_pan(event)
             return
         point = self.canvas_to_image(event.x, event.y)
         if self.tool == TOOL_SELECT:
-            self._select_region_at(point)
+            region_id = self._region_at(point)
+            self.selected_region_id = region_id
+            self.on_region_selected(region_id)
+            if region_id is not None:
+                self._start_region_move(region_id, point)
+            self.redraw()
+            return
+        if self.selected_region_id is not None and self._point_inside_region(
+            self.selected_region_id,
+            point,
+        ):
+            self._start_region_move(self.selected_region_id, point)
             return
         self._drawing_start = point
         self._current_point = point
@@ -247,6 +265,9 @@ class CanvasView(ttk.Frame):
     def _left_drag(self, event: tk.Event) -> None:
         if self._panning:
             self._pan_to(event)
+            return
+        if self._moving_region_id is not None:
+            self._move_region_to(event)
             return
         if self.image_item is None or self._drawing_start is None:
             return
@@ -258,6 +279,9 @@ class CanvasView(ttk.Frame):
         self.redraw()
 
     def _left_up(self, event: tk.Event) -> None:
+        if self._moving_region_id is not None:
+            self._end_region_move()
+            return
         if self._panning:
             self._end_pan()
             return
@@ -292,14 +316,17 @@ class CanvasView(ttk.Frame):
 
     def _space_press(self, _event: tk.Event) -> None:
         self._space_down = True
+        self._update_cursor()
 
     def _space_release(self, _event: tk.Event) -> None:
         self._space_down = False
         self._end_pan()
+        self._update_cursor()
 
     def _start_pan(self, event: tk.Event) -> None:
         self._panning = True
         self._last_pan = (event.x, event.y)
+        self._update_cursor()
 
     def _pan_to(self, event: tk.Event) -> None:
         if not self._panning or self._last_pan is None:
@@ -313,6 +340,29 @@ class CanvasView(ttk.Frame):
     def _end_pan(self) -> None:
         self._panning = False
         self._last_pan = None
+        self._update_cursor()
+
+    def _start_region_move(self, region_id: str, point: Point) -> None:
+        self._moving_region_id = region_id
+        self._move_last_point = point
+        self._update_cursor()
+
+    def _move_region_to(self, event: tk.Event) -> None:
+        if self._moving_region_id is None or self._move_last_point is None:
+            return
+        current_point = self.canvas_to_image(event.x, event.y)
+        dx = current_point[0] - self._move_last_point[0]
+        dy = current_point[1] - self._move_last_point[1]
+        if dx == 0 and dy == 0:
+            return
+        if self.on_region_moved(self._moving_region_id, dx, dy):
+            self._move_last_point = current_point
+            self.redraw()
+
+    def _end_region_move(self) -> None:
+        self._moving_region_id = None
+        self._move_last_point = None
+        self._update_cursor()
 
     def _handle_configure(self, event: tk.Event) -> None:
         new_size = (int(event.width), int(event.height))
@@ -348,6 +398,15 @@ class CanvasView(ttk.Frame):
         min_zoom = min(MIN_ZOOM, max_zoom)
         return max(min_zoom, min(value, max_zoom))
 
+    def _update_cursor(self) -> None:
+        if self._panning or self._moving_region_id is not None or self._space_down or self.tool == TOOL_HAND:
+            cursor = "fleur"
+        elif self.tool == TOOL_SELECT:
+            cursor = "arrow"
+        else:
+            cursor = "crosshair"
+        self.canvas.configure(cursor=cursor)
+
     def _commit_shape(self) -> None:
         if self._drawing_start is None or self._current_point is None:
             return
@@ -375,23 +434,35 @@ class CanvasView(ttk.Frame):
             self.on_region_drawn(TOOL_FREEHAND, data, points)
 
     def _select_region_at(self, point: Point) -> None:
+        region_id = self._region_at(point)
+        self.selected_region_id = region_id
+        self.on_region_selected(region_id)
+        self.redraw()
+
+    def _region_at(self, point: Point) -> str | None:
         if self.image_item is None:
-            self.on_region_selected(None)
-            return
+            return None
         for region in reversed(self.image_item.regions):
             if region.visible and point_in_polygon(point, region.polygon_points, include_boundary=True):
-                self.selected_region_id = region.id
-                self.on_region_selected(region.id)
-                self.redraw()
-                return
-        self.selected_region_id = None
-        self.on_region_selected(None)
-        self.redraw()
+                return region.id
+        return None
+
+    def _point_inside_region(self, region_id: str, point: Point) -> bool:
+        if self.image_item is None:
+            return False
+        region = next((item for item in self.image_item.regions if item.id == region_id), None)
+        return bool(
+            region is not None
+            and region.visible
+            and point_in_polygon(point, region.polygon_points, include_boundary=True)
+        )
 
     def _reset_drawing(self) -> None:
         self._drawing_start = None
         self._current_point = None
         self._freehand_points = []
+        self._moving_region_id = None
+        self._move_last_point = None
         self._panning = False
         self._last_pan = None
 
