@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 import_debug.log
 app_errors.log
+111.png
 output/
 build/
 dist/
