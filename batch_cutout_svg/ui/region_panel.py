@@ -7,6 +7,9 @@ from typing import Callable
 from batch_cutout_svg.core.mask import CutoutOptions
 from batch_cutout_svg.models import Region
 
+CHECKED_MARK = "☑"
+UNCHECKED_MARK = "☐"
+
 
 class RegionPanel(ttk.Frame):
     def __init__(
@@ -17,6 +20,8 @@ class RegionPanel(ttk.Frame):
         on_toggle_visible: Callable[[], None],
         on_delete: Callable[[], None],
         on_browse_output: Callable[[], None],
+        on_check_changed: Callable[[str, bool], None],
+        on_export_selected: Callable[[], None],
         on_export: Callable[[], None],
     ) -> None:
         super().__init__(master)
@@ -25,9 +30,13 @@ class RegionPanel(ttk.Frame):
         self.on_toggle_visible = on_toggle_visible
         self.on_delete = on_delete
         self.on_browse_output = on_browse_output
+        self.on_check_changed = on_check_changed
+        self.on_export_selected = on_export_selected
         self.on_export = on_export
         self._updating_tree = False
         self._suppress_selection_callback = False
+        self._checked_region_ids: set[str] = set()
+        self._checkbox_click_region_id: str | None = None
 
         self.name_var = tk.StringVar()
         self.output_dir_var = tk.StringVar()
@@ -39,7 +48,7 @@ class RegionPanel(ttk.Frame):
         self.keep_largest_component_var = tk.BooleanVar(value=False)
 
         ttk.Label(self, text="区域列表").pack(anchor="w", padx=8, pady=(8, 4))
-        columns = ("name", "type", "visible", "status")
+        columns = ("checked", "name", "type", "visible", "status")
         self.tree = ttk.Treeview(
             self,
             columns=columns,
@@ -48,7 +57,8 @@ class RegionPanel(ttk.Frame):
             height=12,
         )
         for column, label, width in (
-            ("name", "名称", 110),
+            ("checked", "选", 38),
+            ("name", "名称", 102),
             ("type", "类型", 72),
             ("visible", "显示", 48),
             ("status", "状态", 76),
@@ -134,12 +144,18 @@ class RegionPanel(ttk.Frame):
             text="只保留最大连通域",
             variable=self.keep_largest_component_var,
         ).grid(row=6, column=1, sticky="w", padx=8, pady=(0, 4))
-        ttk.Button(settings, text="导出全部 SVG", command=self.on_export).grid(
+        ttk.Button(settings, text="导出选中 SVG", command=self.on_export_selected).grid(
             row=7,
             column=0,
-            columnspan=2,
             sticky="ew",
             padx=8,
+            pady=(2, 8),
+        )
+        ttk.Button(settings, text="导出全部 SVG", command=self.on_export).grid(
+            row=7,
+            column=1,
+            sticky="ew",
+            padx=(0, 8),
             pady=(2, 8),
         )
         settings.columnconfigure(0, weight=1)
@@ -148,10 +164,23 @@ class RegionPanel(ttk.Frame):
         self.progress = ttk.Progressbar(self, mode="determinate")
         self.progress.pack(fill="x", padx=8, pady=(0, 8))
 
-    def set_regions(self, regions: list[Region], selected_region_id: str | None) -> None:
+    def set_regions(
+        self,
+        regions: list[Region],
+        selected_region_id: str | None,
+        preserve_checked: bool = True,
+        checked_region_ids: set[str] | None = None,
+    ) -> None:
         self._updating_tree = True
         self._suppress_selection_callback = True
         try:
+            region_ids = {region.id for region in regions}
+            if checked_region_ids is not None:
+                self._checked_region_ids = set(checked_region_ids) & region_ids
+            elif preserve_checked:
+                self._checked_region_ids.intersection_update(region_ids)
+            else:
+                self._checked_region_ids.clear()
             for iid in self.tree.get_children():
                 self.tree.delete(iid)
             for index, region in enumerate(regions, start=1):
@@ -160,6 +189,7 @@ class RegionPanel(ttk.Frame):
                     "end",
                     iid=region.id,
                     values=(
+                        self._check_mark(region.id),
                         f"{index}. {region.display_name}",
                         region.shape_label,
                         "是" if region.visible else "否",
@@ -189,6 +219,15 @@ class RegionPanel(ttk.Frame):
         selection = self.tree.selection()
         return selection[0] if selection else None
 
+    def checked_region_ids(self) -> set[str]:
+        return set(self._checked_region_ids)
+
+    def set_checked_region_ids(self, region_ids: set[str]) -> None:
+        existing_ids = set(self.tree.get_children())
+        self._checked_region_ids = {region_id for region_id in region_ids if region_id in existing_ids}
+        for iid in self.tree.get_children():
+            self.tree.set(iid, "checked", self._check_mark(iid))
+
     def set_output_dir(self, value: str) -> None:
         self.output_dir_var.set(value)
 
@@ -217,10 +256,15 @@ class RegionPanel(ttk.Frame):
     def _handle_click(self, event: tk.Event) -> str | None:
         region = self.tree.identify_region(event.x, event.y)
         row_id = self.tree.identify_row(event.y)
+        column_id = self.tree.identify_column(event.x)
         if region not in {"cell", "tree"}:
             return None
         if not row_id:
             self.clear_selection()
+            return "break"
+        if column_id == "#1":
+            self._toggle_checked(row_id)
+            self._checkbox_click_region_id = row_id
             return "break"
         return None
 
@@ -228,6 +272,9 @@ class RegionPanel(ttk.Frame):
         if self._updating_tree or self._suppress_selection_callback:
             return
         row_id = self.tree.identify_row(event.y)
+        if self._checkbox_click_region_id is not None:
+            self._checkbox_click_region_id = None
+            return
         if row_id and row_id in self.tree.selection():
             self.on_select(row_id)
 
@@ -239,6 +286,20 @@ class RegionPanel(ttk.Frame):
 
     def _clear_selection_suppression(self) -> None:
         self._suppress_selection_callback = False
+
+    def _toggle_checked(self, region_id: str) -> None:
+        if region_id in self._checked_region_ids:
+            self._checked_region_ids.remove(region_id)
+            checked = False
+        else:
+            self._checked_region_ids.add(region_id)
+            checked = True
+        if region_id in self.tree.get_children():
+            self.tree.set(region_id, "checked", self._check_mark(region_id))
+        self.on_check_changed(region_id, checked)
+
+    def _check_mark(self, region_id: str) -> str:
+        return CHECKED_MARK if region_id in self._checked_region_ids else UNCHECKED_MARK
 
     def _rename(self) -> None:
         self.on_rename(self.name_var.get().strip())

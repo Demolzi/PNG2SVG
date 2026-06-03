@@ -7,9 +7,10 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
-from batch_cutout_svg.core.exporter import export_all
+from batch_cutout_svg.core.exporter import ExportFailure, ExportSummary, export_all, export_region_as_svg
 from batch_cutout_svg.core.geometry import Point, validate_polygon
 from batch_cutout_svg.core.image_loader import discover_images_in_folder, load_images_with_report
+from batch_cutout_svg.core.naming import build_region_export_path
 from batch_cutout_svg.models import ImageItem, Region
 from batch_cutout_svg.models.region import next_region_id
 from batch_cutout_svg.ui.canvas import (
@@ -43,6 +44,7 @@ class MainWindow(tk.Tk):
         self.images: list[ImageItem] = []
         self.current_image: ImageItem | None = None
         self.selected_region_id: str | None = None
+        self._checked_region_ids_by_image: dict[str, set[str]] = {}
         self.status_var = tk.StringVar(value="导入图片后开始绘制区域。")
         self.tool_var = tk.StringVar(value=TOOL_RECT)
 
@@ -92,6 +94,8 @@ class MainWindow(tk.Tk):
             on_toggle_visible=self.toggle_selected_region_visible,
             on_delete=self.delete_selected_region,
             on_browse_output=self.browse_output_dir,
+            on_check_changed=self.region_check_changed,
+            on_export_selected=self.export_checked_regions,
             on_export=self.export_all_regions,
         )
 
@@ -187,7 +191,11 @@ class MainWindow(tk.Tk):
         self.canvas_view.set_image_item(image)
         self._log_import("after canvas_view.set_image_item")
         self._log_import("before region_panel.set_regions")
-        self.region_panel.set_regions(image.regions, None)
+        self.region_panel.set_regions(
+            image.regions,
+            None,
+            checked_region_ids=self._checked_region_ids_for(image),
+        )
         self._log_import("after region_panel.set_regions")
         self._update_status()
         self._log_import("select_image done")
@@ -219,7 +227,11 @@ class MainWindow(tk.Tk):
         self.current_image.regions.append(region)
         self.selected_region_id = region.id
         self.canvas_view.set_selected_region(region.id)
-        self.region_panel.set_regions(self.current_image.regions, region.id)
+        self.region_panel.set_regions(
+            self.current_image.regions,
+            region.id,
+            checked_region_ids=self._checked_region_ids_for_current(),
+        )
         self.image_list.set_images(self.images)
         self._update_status()
         return True
@@ -228,8 +240,21 @@ class MainWindow(tk.Tk):
         self.selected_region_id = region_id
         self.canvas_view.set_selected_region(region_id)
         if self.current_image is not None:
-            self.region_panel.set_regions(self.current_image.regions, region_id)
+            self.region_panel.set_regions(
+                self.current_image.regions,
+                region_id,
+                checked_region_ids=self._checked_region_ids_for_current(),
+            )
         self._update_status()
+
+    def region_check_changed(self, region_id: str, checked: bool) -> None:
+        if self.current_image is None:
+            return
+        checked_ids = self._checked_region_ids_for_current()
+        if checked:
+            checked_ids.add(region_id)
+        else:
+            checked_ids.discard(region_id)
 
     def move_region(self, region_id: str, dx: float, dy: float) -> bool:
         if self.current_image is None:
@@ -281,11 +306,13 @@ class MainWindow(tk.Tk):
         if region_id is None:
             self.status_var.set("请先选择要删除的区域。")
             return
+        checked_ids = set(self._checked_region_ids_for_current())
         self.current_image.regions = [
             region
             for region in self.current_image.regions
             if region.id != region_id
         ]
+        self._set_checked_region_ids_for_current(checked_ids - {region_id})
         self.selected_region_id = None
         self._refresh_regions()
 
@@ -302,13 +329,9 @@ class MainWindow(tk.Tk):
         if total_regions == 0:
             messagebox.showinfo("没有区域", "请先绘制至少一个闭合区域。")
             return
-        output_dir = self.region_panel.output_dir()
-        if not output_dir:
-            folder = filedialog.askdirectory(title="选择导出目录")
-            if not folder:
-                return
-            output_dir = folder
-            self.region_panel.set_output_dir(folder)
+        output_dir = self._ensure_output_dir()
+        if output_dir is None:
+            return
 
         def update_progress(done: int, total: int) -> None:
             self.region_panel.set_progress(done, total)
@@ -324,6 +347,61 @@ class MainWindow(tk.Tk):
         )
         self.image_list.set_images(self.images)
         self._update_status()
+        self._show_export_summary(summary, "导出完成")
+
+    def export_checked_regions(self) -> None:
+        if self.current_image is None:
+            messagebox.showinfo("没有图片", "请先导入图片并选择要导出的区域。")
+            return
+        checked_ids = self._checked_region_ids_for_current()
+        selected_regions = [
+            (index, region)
+            for index, region in enumerate(self.current_image.regions, start=1)
+            if region.id in checked_ids
+        ]
+        if not selected_regions:
+            messagebox.showinfo("没有选中区域", "请先在右侧区域列表中勾选要导出的区域。")
+            return
+        output_dir = self._ensure_output_dir()
+        if output_dir is None:
+            return
+
+        summary = ExportSummary()
+        total = len(selected_regions)
+        cutout_options = self.region_panel.cutout_options()
+        feather_radius = self.region_panel.feather_radius()
+        for done, (index, region) in enumerate(selected_regions, start=1):
+            try:
+                if not region.is_valid:
+                    raise ValueError(region.error_message or "区域非法。")
+                output_path = build_region_export_path(output_dir, self.current_image, region, index)
+                exported = export_region_as_svg(
+                    self.current_image,
+                    region,
+                    output_path,
+                    feather_radius=feather_radius,
+                    cutout_options=cutout_options,
+                )
+                summary.exported_paths.append(exported)
+            except Exception as exc:  # noqa: BLE001 - selected batch export keeps going.
+                summary.failures.append(
+                    ExportFailure(
+                        image_name=self.current_image.file_name,
+                        region_name=region.display_name,
+                        reason=str(exc),
+                    )
+                )
+            self.region_panel.set_progress(done, total)
+            self.status_var.set(f"正在导出选中区域 {done}/{total} ...")
+            self.update_idletasks()
+
+        if summary.success_count:
+            self.current_image.exported = True
+        self.image_list.set_images(self.images)
+        self._update_status()
+        self._show_export_summary(summary, "选中区域导出完成")
+
+    def _show_export_summary(self, summary: ExportSummary, success_title: str) -> None:
         if summary.failures:
             details = "\n".join(
                 f"{failure.image_name} / {failure.region_name}: {failure.reason}"
@@ -336,7 +414,17 @@ class MainWindow(tk.Tk):
                 f"成功 {summary.success_count} 个，失败 {summary.failure_count} 个。\n\n{details}",
             )
         else:
-            messagebox.showinfo("导出完成", f"成功导出 {summary.success_count} 个 SVG。")
+            messagebox.showinfo(success_title, f"成功导出 {summary.success_count} 个 SVG。")
+
+    def _ensure_output_dir(self) -> str | None:
+        output_dir = self.region_panel.output_dir()
+        if output_dir:
+            return output_dir
+        folder = filedialog.askdirectory(title="选择导出目录")
+        if not folder:
+            return None
+        self.region_panel.set_output_dir(folder)
+        return folder
 
     def _tool_changed(self) -> None:
         self.canvas_view.set_tool(self.tool_var.get())
@@ -358,10 +446,28 @@ class MainWindow(tk.Tk):
         if self.current_image is None:
             return
         self.canvas_view.set_selected_region(self.selected_region_id)
-        self.region_panel.set_regions(self.current_image.regions, self.selected_region_id)
+        self.region_panel.set_regions(
+            self.current_image.regions,
+            self.selected_region_id,
+            checked_region_ids=self._checked_region_ids_for_current(),
+        )
         self.image_list.set_images(self.images)
         self.canvas_view.redraw()
         self._update_status()
+
+    def _checked_region_ids_for_current(self) -> set[str]:
+        if self.current_image is None:
+            return set()
+        return self._checked_region_ids_for(self.current_image)
+
+    def _checked_region_ids_for(self, image: ImageItem) -> set[str]:
+        return self._checked_region_ids_by_image.setdefault(self._path_key(image.path), set())
+
+    def _set_checked_region_ids_for_current(self, region_ids: set[str]) -> None:
+        if self.current_image is None:
+            return
+        existing_ids = {region.id for region in self.current_image.regions}
+        self._checked_region_ids_by_image[self._path_key(self.current_image.path)] = region_ids & existing_ids
 
     def _update_status(self) -> None:
         if self.current_image is None:
