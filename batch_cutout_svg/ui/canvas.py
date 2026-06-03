@@ -251,12 +251,6 @@ class CanvasView(ttk.Frame):
                 self._start_region_move(region_id, point)
             self.redraw()
             return
-        if self.selected_region_id is not None and self._point_inside_region(
-            self.selected_region_id,
-            point,
-        ):
-            self._start_region_move(self.selected_region_id, point)
-            return
         self._drawing_start = point
         self._current_point = point
         self._freehand_points = [point] if self.tool == TOOL_FREEHAND else []

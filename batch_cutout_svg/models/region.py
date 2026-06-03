@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+import re
+from typing import Any, Iterable
 
 Point = tuple[float, float]
 
@@ -36,6 +37,21 @@ class Region:
         return "合法" if self.is_valid else f"非法: {self.error_message or '未知原因'}"
 
 
+REGION_ID_PATTERN = re.compile(r"^region(\d+)$")
+
+
 def next_region_id(existing_count: int) -> str:
     return f"region{existing_count + 1:03d}"
 
+
+def next_available_region_id(existing_ids: Iterable[str]) -> str:
+    used_numbers: set[int] = set()
+    for region_id in existing_ids:
+        match = REGION_ID_PATTERN.match(region_id)
+        if match is not None:
+            used_numbers.add(int(match.group(1)))
+
+    candidate = 1
+    while candidate in used_numbers:
+        candidate += 1
+    return f"region{candidate:03d}"

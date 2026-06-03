@@ -183,7 +183,11 @@ class RegionPanel(ttk.Frame):
                 self._checked_region_ids.clear()
             for iid in self.tree.get_children():
                 self.tree.delete(iid)
+            inserted_ids: set[str] = set()
             for index, region in enumerate(regions, start=1):
+                if region.id in inserted_ids:
+                    continue
+                inserted_ids.add(region.id)
                 self.tree.insert(
                     "",
                     "end",
@@ -207,7 +211,7 @@ class RegionPanel(ttk.Frame):
                 self.name_var.set("")
         finally:
             self._updating_tree = False
-            self.after_idle(self._clear_selection_suppression)
+            self.after(10, self._clear_selection_suppression)
 
     def clear_selection(self) -> None:
         self.tree.selection_remove(self.tree.selection())
@@ -254,6 +258,8 @@ class RegionPanel(ttk.Frame):
         self.progress.configure(maximum=max(1, total), value=current)
 
     def _handle_click(self, event: tk.Event) -> str | None:
+        if not self._updating_tree:
+            self._clear_selection_suppression()
         region = self.tree.identify_region(event.x, event.y)
         row_id = self.tree.identify_row(event.y)
         column_id = self.tree.identify_column(event.x)

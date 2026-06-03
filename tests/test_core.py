@@ -18,6 +18,7 @@ from batch_cutout_svg.core.geometry import (
 from batch_cutout_svg.core.image_loader import discover_images_in_folder, load_images_with_report
 from batch_cutout_svg.core.mask import CutoutOptions, create_cutout_png
 from batch_cutout_svg.core.naming import sanitize_filename_part, unique_path
+from batch_cutout_svg.models.region import next_available_region_id
 from batch_cutout_svg.ui.main_window import _coerce_dialog_paths, _translate_region
 from batch_cutout_svg.models import ImageItem, Region
 
@@ -124,6 +125,13 @@ class ImageLoaderTests(unittest.TestCase):
 
 
 class RegionMoveTests(unittest.TestCase):
+    def test_next_available_region_id_reuses_deleted_gap(self) -> None:
+        region_id = next_available_region_id(
+            ["region001", "region003", "region004", "region005", "region006"]
+        )
+
+        self.assertEqual(region_id, "region002")
+
     def test_translate_rect_region_updates_polygon_and_data(self) -> None:
         region = Region(
             id="region001",

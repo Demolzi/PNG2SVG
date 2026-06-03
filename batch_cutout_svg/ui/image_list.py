@@ -70,7 +70,7 @@ class ImageListPanel(ttk.Frame):
                 self.tree.focus(iid)
                 self.tree.see(iid)
             finally:
-                self.after_idle(self._clear_selection_suppression)
+                self.after(10, self._clear_selection_suppression)
         else:
             self.tree.selection_set(iid)
             self.tree.focus(iid)
@@ -84,7 +84,6 @@ class ImageListPanel(ttk.Frame):
 
     def _handle_select(self, _event: tk.Event) -> None:
         if self._suppress_selection_callback:
-            self._clear_selection_suppression()
             return
         selected = self.selected_path()
         if selected is not None:

@@ -12,7 +12,7 @@ from batch_cutout_svg.core.geometry import Point, validate_polygon
 from batch_cutout_svg.core.image_loader import discover_images_in_folder, load_images_with_report
 from batch_cutout_svg.core.naming import build_region_export_path
 from batch_cutout_svg.models import ImageItem, Region
-from batch_cutout_svg.models.region import next_region_id
+from batch_cutout_svg.models.region import next_available_region_id
 from batch_cutout_svg.ui.canvas import (
     TOOL_ELLIPSE,
     TOOL_FREEHAND,
@@ -215,7 +215,7 @@ class MainWindow(tk.Tk):
             self.status_var.set(validation.error_message or "区域非法。")
             return False
 
-        region_id = next_region_id(len(self.current_image.regions))
+        region_id = next_available_region_id(region.id for region in self.current_image.regions)
         region = Region(
             id=region_id,
             name=region_id,
@@ -345,8 +345,7 @@ class MainWindow(tk.Tk):
             cutout_options=self.region_panel.cutout_options(),
             progress_callback=update_progress,
         )
-        self.image_list.set_images(self.images)
-        self._update_status()
+        self._restore_editing_state_after_export()
         self._show_export_summary(summary, "导出完成")
 
     def export_checked_regions(self) -> None:
@@ -397,8 +396,7 @@ class MainWindow(tk.Tk):
 
         if summary.success_count:
             self.current_image.exported = True
-        self.image_list.set_images(self.images)
-        self._update_status()
+        self._restore_editing_state_after_export()
         self._show_export_summary(summary, "选中区域导出完成")
 
     def _show_export_summary(self, summary: ExportSummary, success_title: str) -> None:
@@ -453,6 +451,32 @@ class MainWindow(tk.Tk):
         )
         self.image_list.set_images(self.images)
         self.canvas_view.redraw()
+        self._update_status()
+
+    def _restore_editing_state_after_export(self) -> None:
+        current_image = self.current_image
+        selected_region_id = self.selected_region_id
+        self.image_list.set_images(self.images)
+        if current_image is None:
+            self._update_status()
+            return
+
+        self.current_image = current_image
+        self.selected_region_id = (
+            selected_region_id
+            if any(region.id == selected_region_id for region in current_image.regions)
+            else None
+        )
+        self.image_list.select_path(current_image.path, notify=False)
+        if self.canvas_view.image_item is not current_image:
+            self.canvas_view.set_image_item(current_image)
+        self.canvas_view.set_selected_region(self.selected_region_id)
+        self.region_panel.set_regions(
+            current_image.regions,
+            self.selected_region_id,
+            checked_region_ids=self._checked_region_ids_for_current(),
+        )
+        self.update_idletasks()
         self._update_status()
 
     def _checked_region_ids_for_current(self) -> set[str]:
