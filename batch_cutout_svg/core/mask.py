@@ -9,6 +9,7 @@ from .geometry import Point, bounding_box, normalize_points
 
 CUTOUT_MODE_REGION = "region_only"
 CUTOUT_MODE_BACKGROUND = "background_remove"
+CUTOUT_MODE_GRABCUT = "grabcut"
 TARGET_FILTER_OFF = "off"
 TARGET_FILTER_LARGEST = "largest"
 TARGET_FILTER_MAIN_WITH_NEIGHBORS = "main_with_neighbors"
@@ -19,6 +20,8 @@ def _normalize_cutout_mode(mode: str) -> str:
     normalized = str(mode or "").strip().lower()
     if normalized == CUTOUT_MODE_REGION:
         return CUTOUT_MODE_REGION
+    if normalized == CUTOUT_MODE_GRABCUT:
+        return CUTOUT_MODE_GRABCUT
     return CUTOUT_MODE_BACKGROUND
 
 
@@ -40,6 +43,8 @@ class CutoutOptions:
     decontaminate_alpha_min: int = 20
     decontaminate_alpha_max: int = 250
     defringe_strength: int = 1
+    grabcut_iterations: int = 5
+    grabcut_fallback_to_background: bool = True
 
 
 @dataclass(frozen=True)
@@ -102,8 +107,11 @@ def _foreground_mask_for_mode(
     user_region_mask: Image.Image,
     options: CutoutOptions,
 ) -> Image.Image:
-    if _normalize_cutout_mode(options.mode) == CUTOUT_MODE_REGION:
+    mode = _normalize_cutout_mode(options.mode)
+    if mode == CUTOUT_MODE_REGION:
         return user_region_mask.copy()
+    if mode == CUTOUT_MODE_GRABCUT:
+        return _foreground_mask_from_grabcut(roi, user_region_mask, options)
     return _foreground_mask_from_boundary_fill(roi, user_region_mask, options)
 
 
@@ -181,6 +189,148 @@ def _foreground_mask_from_boundary_fill(
             if region_pixels[x, y] > 0 and not visited_background[index(x, y)]:
                 foreground_pixels[x, y] = region_pixels[x, y]
     return foreground_mask
+
+
+def _foreground_mask_from_grabcut(
+    roi: Image.Image,
+    user_region_mask: Image.Image,
+    options: CutoutOptions,
+) -> Image.Image:
+    try:
+        import cv2  # type: ignore[import-not-found]
+        import numpy as np
+    except ImportError:
+        return _grabcut_fallback_mask(roi, user_region_mask, options)
+
+    width, height = roi.size
+    if width <= 1 or height <= 1:
+        return _grabcut_fallback_mask(roi, user_region_mask, options)
+
+    rgba = roi.convert("RGBA")
+    rgb_array = np.asarray(rgba.convert("RGB"), dtype=np.uint8).copy()
+    alpha_array = np.asarray(rgba.getchannel("A"), dtype=np.uint8)
+    region_array = np.asarray(user_region_mask.convert("L"), dtype=np.uint8) > 0
+    region_area = int(region_array.sum())
+    if region_area <= 0:
+        return Image.new("L", roi.size, 0)
+
+    grabcut_mask = np.full((height, width), cv2.GC_BGD, dtype=np.uint8)
+    grabcut_mask[region_array] = cv2.GC_PR_FGD
+    grabcut_mask[alpha_array <= 0] = cv2.GC_BGD
+
+    fallback_foreground = _foreground_mask_from_boundary_fill(roi, user_region_mask, options)
+    fallback_array = np.asarray(fallback_foreground.convert("L"), dtype=np.uint8) > 0
+    fallback_area = int(fallback_array.sum())
+    if 0 < fallback_area < region_area * 0.95:
+        grabcut_mask[fallback_array] = cv2.GC_FGD
+        grabcut_mask[region_array & ~fallback_array] = cv2.GC_BGD
+    else:
+        seed_array = _central_seed_array(region_array)
+        if int(seed_array.sum()) > 0:
+            grabcut_mask[seed_array] = cv2.GC_FGD
+
+    _mark_roi_boundary_background(grabcut_mask, region_array, cv2.GC_BGD)
+    if not _has_grabcut_class(grabcut_mask, cv2.GC_FGD):
+        seed_array = _central_seed_array(region_array)
+        if int(seed_array.sum()) <= 0:
+            return _grabcut_fallback_mask(roi, user_region_mask, options)
+        grabcut_mask[seed_array] = cv2.GC_FGD
+    if not _has_grabcut_background(grabcut_mask, cv2):
+        return _grabcut_fallback_mask(roi, user_region_mask, options)
+
+    bgd_model = np.zeros((1, 65), np.float64)
+    fgd_model = np.zeros((1, 65), np.float64)
+    try:
+        cv2.grabCut(
+            rgb_array,
+            grabcut_mask,
+            None,
+            bgd_model,
+            fgd_model,
+            max(1, int(options.grabcut_iterations)),
+            cv2.GC_INIT_WITH_MASK,
+        )
+    except Exception:
+        return _grabcut_fallback_mask(roi, user_region_mask, options)
+
+    output_array = (
+        ((grabcut_mask == cv2.GC_FGD) | (grabcut_mask == cv2.GC_PR_FGD))
+        & region_array
+    )
+    output_area = int(output_array.sum())
+    if _grabcut_result_failed(output_area, region_area):
+        return _grabcut_fallback_mask(roi, user_region_mask, options)
+    return Image.frombytes("L", roi.size, (output_array.astype(np.uint8) * 255).tobytes())
+
+
+def _grabcut_fallback_mask(
+    roi: Image.Image,
+    user_region_mask: Image.Image,
+    options: CutoutOptions,
+) -> Image.Image:
+    if options.grabcut_fallback_to_background:
+        return _foreground_mask_from_boundary_fill(roi, user_region_mask, options)
+    return user_region_mask.copy()
+
+
+def _central_seed_array(region_array):
+    try:
+        import numpy as np
+    except ImportError:
+        return region_array
+    ys, xs = np.where(region_array)
+    if len(xs) == 0 or len(ys) == 0:
+        return np.zeros_like(region_array, dtype=bool)
+    left, right = int(xs.min()), int(xs.max())
+    top, bottom = int(ys.min()), int(ys.max())
+    width = right - left + 1
+    height = bottom - top + 1
+    seed_left = left + max(0, round(width * 0.3))
+    seed_right = right - max(0, round(width * 0.3))
+    seed_top = top + max(0, round(height * 0.3))
+    seed_bottom = bottom - max(0, round(height * 0.3))
+    if seed_right < seed_left or seed_bottom < seed_top:
+        seed_left, seed_right = left, right
+        seed_top, seed_bottom = top, bottom
+    seed = np.zeros_like(region_array, dtype=bool)
+    seed[seed_top : seed_bottom + 1, seed_left : seed_right + 1] = True
+    return seed & region_array
+
+
+def _mark_roi_boundary_background(grabcut_mask, region_array, background_value: int) -> None:
+    height, width = region_array.shape
+    if width <= 0 or height <= 0:
+        return
+    grabcut_mask[0, region_array[0, :]] = background_value
+    grabcut_mask[height - 1, region_array[height - 1, :]] = background_value
+    grabcut_mask[region_array[:, 0], 0] = background_value
+    grabcut_mask[region_array[:, width - 1], width - 1] = background_value
+
+
+def _has_grabcut_class(grabcut_mask, value: int) -> bool:
+    try:
+        import numpy as np
+    except ImportError:
+        return False
+    return bool(np.any(grabcut_mask == value))
+
+
+def _has_grabcut_background(grabcut_mask, cv2_module) -> bool:
+    try:
+        import numpy as np
+    except ImportError:
+        return False
+    return bool(
+        np.any(grabcut_mask == cv2_module.GC_BGD)
+        or np.any(grabcut_mask == cv2_module.GC_PR_BGD)
+    )
+
+
+def _grabcut_result_failed(foreground_area: int, region_area: int) -> bool:
+    if region_area <= 0:
+        return True
+    ratio = foreground_area / region_area
+    return ratio < 0.01 or ratio > 0.95
 
 
 def _is_near_white(

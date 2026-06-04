@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import importlib.util
 import shutil
 import unittest
 import uuid
@@ -17,6 +18,7 @@ from batch_cutout_svg.core.geometry import (
 )
 from batch_cutout_svg.core.image_loader import discover_images_in_folder, load_images_with_report
 from batch_cutout_svg.core.mask import (
+    CUTOUT_MODE_GRABCUT,
     CUTOUT_MODE_REGION,
     CutoutOptions,
     create_cutout_png,
@@ -184,6 +186,7 @@ class CutoutPresetTests(unittest.TestCase):
         self.assertEqual(options.edge_feather_radius, 0.7)
         self.assertEqual(options.target_filter_mode, TARGET_FILTER_MAIN_WITH_NEIGHBORS)
         self.assertEqual(options.main_neighbor_distance, 20)
+        self.assertEqual(options.grabcut_iterations, 5)
 
     def test_unknown_preset_falls_back_to_standard(self) -> None:
         options = cutout_options_for_preset("background_remove", "missing")
@@ -258,6 +261,51 @@ class MaskAndExporterTests(unittest.TestCase):
 
         self.assertEqual(cutout.getpixel((0, 0))[3], 0)
         self.assertEqual(cutout.getpixel((10, 10))[3], 255)
+
+    def test_grabcut_mode_exports_foreground_with_fallback_available(self) -> None:
+        image = Image.new("RGBA", (24, 24), (255, 255, 255, 255))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((7, 7, 16, 16), fill=(20, 80, 180, 255))
+
+        cutout = create_cutout_png(
+            image,
+            rect_to_points(0, 0, 24, 24),
+            options=CutoutOptions(
+                mode=CUTOUT_MODE_GRABCUT,
+                edge_smooth_level=0,
+                edge_feather_radius=0,
+                remove_small_components=False,
+                target_filter_mode=TARGET_FILTER_OFF,
+                grabcut_iterations=1,
+            ),
+        )
+
+        self.assertEqual(cutout.getpixel((1, 1))[3], 0)
+        self.assertEqual(cutout.getpixel((12, 12))[3], 255)
+
+    @unittest.skipUnless(importlib.util.find_spec("cv2"), "OpenCV is not installed")
+    def test_grabcut_mode_uses_opencv_path_when_available(self) -> None:
+        image = Image.new("RGBA", (30, 30), (80, 80, 80, 255))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((9, 9, 20, 20), fill=(220, 40, 30, 255))
+
+        cutout = create_cutout_png(
+            image,
+            rect_to_points(0, 0, 30, 30),
+            options=CutoutOptions(
+                mode=CUTOUT_MODE_GRABCUT,
+                edge_smooth_level=0,
+                edge_feather_radius=0,
+                decontaminate_edge=False,
+                remove_small_components=False,
+                target_filter_mode=TARGET_FILTER_OFF,
+                grabcut_iterations=5,
+                grabcut_fallback_to_background=False,
+            ),
+        )
+
+        self.assertEqual(cutout.getpixel((2, 2))[3], 0)
+        self.assertEqual(cutout.getpixel((15, 15))[3], 255)
 
     def test_defringe_replaces_semitransparent_white_edge_rgb(self) -> None:
         image = Image.new("RGBA", (8, 8), (0, 0, 0, 0))

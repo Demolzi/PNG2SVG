@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -27,6 +28,7 @@ from PySide6.QtWidgets import (
 
 from batch_cutout_svg.core.mask import (
     CUTOUT_MODE_BACKGROUND,
+    CUTOUT_MODE_GRABCUT,
     CUTOUT_MODE_REGION,
     CutoutOptions,
     TARGET_FILTER_LARGEST,
@@ -58,6 +60,7 @@ class CutoutPreset:
     target_filter_mode: str
     main_neighbor_distance: int
     defringe_strength: int
+    grabcut_iterations: int
 
 
 CUTOUT_PRESETS = {
@@ -74,6 +77,7 @@ CUTOUT_PRESETS = {
         target_filter_mode=TARGET_FILTER_OFF,
         main_neighbor_distance=20,
         defringe_strength=1,
+        grabcut_iterations=5,
     ),
     "standard": CutoutPreset(
         key="standard",
@@ -88,6 +92,7 @@ CUTOUT_PRESETS = {
         target_filter_mode=TARGET_FILTER_MAIN_WITH_NEIGHBORS,
         main_neighbor_distance=20,
         defringe_strength=1,
+        grabcut_iterations=5,
     ),
     "strong": CutoutPreset(
         key="strong",
@@ -102,6 +107,7 @@ CUTOUT_PRESETS = {
         target_filter_mode=TARGET_FILTER_LARGEST,
         main_neighbor_distance=15,
         defringe_strength=2,
+        grabcut_iterations=7,
     ),
 }
 
@@ -322,6 +328,7 @@ class RegionPanel(QWidget):
             edge_feather_radius=self.feather_radius(),
             decontaminate_edge=self.defringe_strength_spin.value() > 0,
             defringe_strength=self.defringe_strength_spin.value(),
+            grabcut_iterations=self.grabcut_iterations_spin.value(),
         )
 
     def feather_radius(self) -> float:
@@ -357,9 +364,14 @@ class RegionPanel(QWidget):
             "\u4ec5\u533a\u57df\u88c1\u526a",
             CUTOUT_MODE_REGION,
         )
+        self.cutout_mode_combo.addItem(
+            "GrabCut \u5206\u5272\uff08\u975e AI\uff09",
+            CUTOUT_MODE_GRABCUT,
+        )
         self.cutout_mode_combo.setToolTip(
             "\u767d\u5e95\u6a21\u5f0f\u4f1a\u81ea\u52a8\u53bb\u9664\u8fb9\u754c\u8fde\u901a\u7684\u6d45\u8272\u80cc\u666f\uff1b"
-            "\u4ec5\u533a\u57df\u88c1\u526a\u53ea\u4fdd\u7559\u753b\u51fa\u7684\u533a\u57df\u3002"
+            "\u4ec5\u533a\u57df\u88c1\u526a\u53ea\u4fdd\u7559\u753b\u51fa\u7684\u533a\u57df\uff1b"
+            "GrabCut \u7528 OpenCV \u4f20\u7edf\u5206\u5272\u7b97\u6cd5\u589e\u5f3a\u590d\u6742\u80cc\u666f\u3002"
         )
         self.quality_preset_combo = QComboBox()
         for preset in CUTOUT_PRESETS.values():
@@ -385,46 +397,41 @@ class RegionPanel(QWidget):
         advanced_body_layout = QVBoxLayout(self.advanced_options_body)
         advanced_body_layout.setContentsMargins(0, 0, 0, 0)
 
-        grid = QGridLayout()
-        grid.setColumnMinimumWidth(0, 180)
-        grid.setColumnMinimumWidth(1, 180)
+        advanced_form = QFormLayout()
+        advanced_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        advanced_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        advanced_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
         self.feather_spin = QDoubleSpinBox()
         self.feather_spin.setRange(0.0, 10.0)
         self.feather_spin.setDecimals(1)
         self.feather_spin.setSingleStep(0.5)
         self.feather_spin.setValue(1.5)
-        grid.addWidget(QLabel("羽化半径 px"), 0, 0)
-        grid.addWidget(self.feather_spin, 1, 0)
+        advanced_form.addRow("羽化半径 px", self.feather_spin)
 
         self.white_threshold_spin = QSpinBox()
         self.white_threshold_spin.setRange(0, 255)
         self.white_threshold_spin.setValue(240)
-        grid.addWidget(QLabel("白底阈值"), 0, 1)
-        grid.addWidget(self.white_threshold_spin, 1, 1)
+        advanced_form.addRow("白底阈值", self.white_threshold_spin)
 
         self.near_white_tolerance_spin = QSpinBox()
         self.near_white_tolerance_spin.setRange(0, 255)
         self.near_white_tolerance_spin.setValue(15)
-        grid.addWidget(QLabel("近白容差"), 2, 0)
-        grid.addWidget(self.near_white_tolerance_spin, 3, 0)
+        advanced_form.addRow("近白容差", self.near_white_tolerance_spin)
 
         self.min_component_area_spin = QSpinBox()
         self.min_component_area_spin.setRange(1, 10000)
         self.min_component_area_spin.setValue(20)
-        grid.addWidget(QLabel("最小噪点面积"), 2, 1)
-        grid.addWidget(self.min_component_area_spin, 3, 1)
+        advanced_form.addRow("最小噪点面积", self.min_component_area_spin)
 
         self.defringe_strength_spin = QSpinBox()
         self.defringe_strength_spin.setRange(0, 3)
         self.defringe_strength_spin.setValue(1)
-        grid.addWidget(QLabel("\u53bb\u767d\u8fb9\u5f3a\u5ea6"), 4, 0)
-        grid.addWidget(self.defringe_strength_spin, 5, 0)
+        advanced_form.addRow("\u53bb\u767d\u8fb9\u5f3a\u5ea6", self.defringe_strength_spin)
 
         self.edge_smooth_level_spin = QSpinBox()
         self.edge_smooth_level_spin.setRange(0, 3)
         self.edge_smooth_level_spin.setValue(2)
-        grid.addWidget(QLabel("\u8fb9\u7f18\u5e73\u6ed1\u5f3a\u5ea6"), 4, 1)
-        grid.addWidget(self.edge_smooth_level_spin, 5, 1)
+        advanced_form.addRow("\u8fb9\u7f18\u5e73\u6ed1\u5f3a\u5ea6", self.edge_smooth_level_spin)
 
         self.target_filter_mode_combo = QComboBox()
         self.target_filter_mode_combo.addItem("\u5173\u95ed", TARGET_FILTER_OFF)
@@ -433,15 +440,19 @@ class RegionPanel(QWidget):
             TARGET_FILTER_MAIN_WITH_NEIGHBORS,
         )
         self.target_filter_mode_combo.addItem("\u53ea\u4fdd\u7559\u6700\u5927\u4e3b\u4f53", TARGET_FILTER_LARGEST)
-        grid.addWidget(QLabel("\u4e3b\u4f53\u7b5b\u9009\u6a21\u5f0f"), 6, 0)
-        grid.addWidget(self.target_filter_mode_combo, 7, 0)
+        self.target_filter_mode_combo.setMinimumWidth(220)
+        advanced_form.addRow("\u4e3b\u4f53\u7b5b\u9009\u6a21\u5f0f", self.target_filter_mode_combo)
 
         self.main_neighbor_distance_spin = QSpinBox()
         self.main_neighbor_distance_spin.setRange(0, 200)
         self.main_neighbor_distance_spin.setValue(20)
-        grid.addWidget(QLabel("\u4e3b\u4f53\u8fd1\u90bb\u8ddd\u79bb px"), 6, 1)
-        grid.addWidget(self.main_neighbor_distance_spin, 7, 1)
-        advanced_body_layout.addLayout(grid)
+        advanced_form.addRow("\u4e3b\u4f53\u8fd1\u90bb\u8ddd\u79bb px", self.main_neighbor_distance_spin)
+
+        self.grabcut_iterations_spin = QSpinBox()
+        self.grabcut_iterations_spin.setRange(1, 10)
+        self.grabcut_iterations_spin.setValue(5)
+        advanced_form.addRow("GrabCut \u8fed\u4ee3\u6b21\u6570", self.grabcut_iterations_spin)
+        advanced_body_layout.addLayout(advanced_form)
 
         checks = QHBoxLayout()
         self.remove_small_components_check = QCheckBox("去除小噪点")
@@ -449,9 +460,13 @@ class RegionPanel(QWidget):
         self.remove_small_components_check.setMinimumWidth(150)
         checks.addWidget(self.remove_small_components_check)
         advanced_body_layout.addLayout(checks)
-        advanced_layout.addWidget(self.advanced_options_body)
-        self.advanced_options_body.setVisible(False)
-        self.advanced_options_group.toggled.connect(self.advanced_options_body.setVisible)
+        self.advanced_options_scroll = QScrollArea()
+        self.advanced_options_scroll.setWidgetResizable(True)
+        self.advanced_options_scroll.setMaximumHeight(260)
+        self.advanced_options_scroll.setWidget(self.advanced_options_body)
+        self.advanced_options_scroll.setVisible(False)
+        self.advanced_options_group.toggled.connect(self.advanced_options_scroll.setVisible)
+        advanced_layout.addWidget(self.advanced_options_scroll)
         layout.addWidget(self.advanced_options_group)
         self._apply_selected_preset_to_controls()
 
@@ -482,6 +497,7 @@ class RegionPanel(QWidget):
         self.main_neighbor_distance_spin.setValue(preset.main_neighbor_distance)
         self.edge_smooth_level_spin.setValue(preset.edge_smooth_level)
         self.defringe_strength_spin.setValue(preset.defringe_strength)
+        self.grabcut_iterations_spin.setValue(preset.grabcut_iterations)
 
     def _handle_select(self) -> None:
         if self._updating_table:
@@ -555,6 +571,7 @@ def cutout_options_for_preset(mode: str, preset_key: str) -> CutoutOptions:
         edge_feather_radius=preset.feather_radius,
         decontaminate_edge=preset.defringe_strength > 0,
         defringe_strength=preset.defringe_strength,
+        grabcut_iterations=preset.grabcut_iterations,
     )
 
 
