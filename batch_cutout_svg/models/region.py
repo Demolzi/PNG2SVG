@@ -23,6 +23,7 @@ class Region:
     is_valid: bool = True
     error_message: str | None = None
     visible: bool = True
+    export_count: int = 0
 
     @property
     def display_name(self) -> str:

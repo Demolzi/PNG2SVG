@@ -9,7 +9,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-from batch_cutout_svg.core.exporter import export_region_as_svg
+from batch_cutout_svg.core.exporter import export_all, export_region_as_svg
 from batch_cutout_svg.core.geometry import (
     point_in_polygon,
     rect_to_points,
@@ -270,6 +270,28 @@ class MaskAndExporterTests(unittest.TestCase):
             embedded = Image.open(BytesIO(base64.b64decode(encoded))).convert("RGBA")
             self.assertEqual(embedded.getpixel((0, 0))[3], 0)
             self.assertEqual(embedded.getpixel((10, 10))[3], 255)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_export_all_increments_region_export_count(self) -> None:
+        tmp = make_test_dir()
+        try:
+            image = Image.new("RGBA", (20, 20), (255, 255, 255, 255))
+            draw = ImageDraw.Draw(image)
+            draw.rectangle((5, 5, 14, 14), fill=(0, 128, 255, 255))
+            region = Region(
+                id="region001",
+                name="part",
+                shape_type="rect",
+                data={},
+                polygon_points=rect_to_points(0, 0, 20, 20),
+            )
+            item = ImageItem(path=Path("sample.png"), image=image, regions=[region])
+
+            summary = export_all([item], tmp, feather_radius=0)
+
+            self.assertEqual(summary.success_count, 1)
+            self.assertEqual(region.export_count, 1)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

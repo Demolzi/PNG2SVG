@@ -52,8 +52,8 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("批量闭合区域抠图导出 SVG")
-        self.resize(1280, 800)
-        self.setMinimumSize(980, 640)
+        self.resize(1440, 860)
+        self.setMinimumSize(1240, 680)
 
         self.images: list[ImageItem] = []
         self.current_image: ImageItem | None = None
@@ -104,12 +104,12 @@ class MainWindow(QMainWindow):
         fit_button.clicked.connect(lambda: self.canvas_view.fit_to_window())
         layout.addWidget(fit_button)
 
-        delete_button = QPushButton("删除区域")
-        delete_button.clicked.connect(self.delete_selected_region)
+        delete_button = QPushButton("删除当前图片全部区域")
+        delete_button.clicked.connect(self.delete_current_image_regions)
         layout.addWidget(delete_button)
 
         layout.addStretch(1)
-        export_all_button = QPushButton("导出全部")
+        export_all_button = QPushButton("导出所有文件")
         export_all_button.clicked.connect(self.export_all_regions)
         layout.addWidget(export_all_button)
         root.addWidget(toolbar)
@@ -126,7 +126,7 @@ class MainWindow(QMainWindow):
             on_browse_output=self.browse_output_dir,
             on_check_changed=self.region_check_changed,
             on_export_selected=self.export_checked_regions,
-            on_export=self.export_all_regions,
+            on_export=self.export_current_image_regions,
         )
 
         splitter.addWidget(self.image_list)
@@ -135,6 +135,9 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 5)
         splitter.setStretchFactor(2, 2)
+        splitter.setCollapsible(1, False)
+        splitter.setCollapsible(2, False)
+        splitter.setSizes([300, 620, 520])
         root.addWidget(splitter, 1)
 
     def import_images(self) -> None:
@@ -336,6 +339,19 @@ class MainWindow(QMainWindow):
         self.selected_region_id = None
         self._refresh_regions()
 
+    def delete_current_image_regions(self) -> None:
+        if self.current_image is None:
+            self._set_status("请先选择一张图片。")
+            return
+        if not self.current_image.regions:
+            self._set_status("当前图片没有可删除的区域。")
+            return
+        self.current_image.regions.clear()
+        self._set_checked_region_ids_for_current(set())
+        self.selected_region_id = None
+        self._refresh_regions()
+        self._set_status(f"已删除当前图片 {self.current_image.file_name} 的全部区域。")
+
     def browse_output_dir(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "选择导出目录")
         if folder:
@@ -366,7 +382,54 @@ class MainWindow(QMainWindow):
             progress_callback=update_progress,
         )
         self._restore_editing_state_after_export()
-        self._show_export_summary(summary, "导出完成")
+        self._show_export_summary(summary, "所有文件导出完成")
+
+    def export_current_image_regions(self) -> None:
+        if self.current_image is None:
+            QMessageBox.information(self, "没有图片", "请先导入并选择一张图片。")
+            return
+        current_regions = list(enumerate(self.current_image.regions, start=1))
+        if not current_regions:
+            QMessageBox.information(self, "没有区域", "当前图片没有可导出的区域。")
+            return
+        output_dir = self._ensure_output_dir()
+        if output_dir is None:
+            return
+
+        summary = ExportSummary()
+        total = len(current_regions)
+        cutout_options = self.region_panel.cutout_options()
+        feather_radius = self.region_panel.feather_radius()
+        for done, (index, region) in enumerate(current_regions, start=1):
+            try:
+                if not region.is_valid:
+                    raise ValueError(region.error_message or "区域非法。")
+                output_path = build_region_export_path(output_dir, self.current_image, region, index)
+                exported = export_region_as_svg(
+                    self.current_image,
+                    region,
+                    output_path,
+                    feather_radius=feather_radius,
+                    cutout_options=cutout_options,
+                )
+                summary.exported_paths.append(exported)
+                region.export_count += 1
+            except Exception as exc:  # noqa: BLE001 - current-image batch export keeps going.
+                summary.failures.append(
+                    ExportFailure(
+                        image_name=self.current_image.file_name,
+                        region_name=region.display_name,
+                        reason=str(exc),
+                    )
+                )
+            self.region_panel.set_progress(done, total)
+            self._set_status(f"正在导出当前图片区域 {done}/{total} ...")
+            QApplication.processEvents()
+
+        if summary.success_count:
+            self.current_image.exported = True
+        self._restore_editing_state_after_export()
+        self._show_export_summary(summary, "当前图片全部区域导出完成")
 
     def export_checked_regions(self) -> None:
         if self.current_image is None:
@@ -402,6 +465,7 @@ class MainWindow(QMainWindow):
                     cutout_options=cutout_options,
                 )
                 summary.exported_paths.append(exported)
+                region.export_count += 1
             except Exception as exc:  # noqa: BLE001 - selected batch export keeps going.
                 summary.failures.append(
                     ExportFailure(

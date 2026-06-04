@@ -113,6 +113,7 @@ def export_all(
                     cutout_options=resolved_options,
                 )
                 summary.exported_paths.append(exported)
+                region.export_count += 1
                 exported_for_image += 1
             except Exception as exc:  # noqa: BLE001 - batch export keeps going.
                 summary.failures.append(
