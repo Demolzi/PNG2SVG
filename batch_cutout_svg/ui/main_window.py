@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import traceback
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QKeyEvent
+from PySide6.QtGui import QIcon, QKeyEvent
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -40,6 +41,7 @@ from batch_cutout_svg.ui.region_panel import RegionPanel
 
 IMPORT_DEBUG_LOG = Path("import_debug.log")
 APP_ERRORS_LOG = Path("app_errors.log")
+APP_ICON_PATH = "assets/feather_pen.ico"
 IMAGE_FILTER = (
     "图片文件 (*.png *.PNG *.jpg *.JPG *.jpeg *.JPEG);;"
     "PNG (*.png *.PNG);;"
@@ -52,6 +54,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("批量闭合区域抠图导出 SVG")
+        self.setWindowIcon(QIcon(str(resource_path(APP_ICON_PATH))))
         self.resize(1440, 860)
         self.setMinimumSize(1240, 680)
 
@@ -660,6 +663,11 @@ def _absolute_path(path: Path) -> Path:
         return expanded.resolve(strict=False)
     except OSError:
         return expanded.absolute()
+
+
+def resource_path(relative_path: str) -> Path:
+    base_path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
+    return base_path / relative_path
 
 
 def _translate_region(
