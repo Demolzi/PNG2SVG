@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass, field
-from html import escape
 from io import BytesIO
 from pathlib import Path
 from typing import Callable
+
+import svgwrite
 
 from batch_cutout_svg.models import ImageItem, Region
 
@@ -57,18 +58,25 @@ def export_region_as_svg(
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    title = escape(region.display_name)
     width, height = cutout.size
-    svg = (
-        '<?xml version="1.0" encoding="UTF-8"?>\n'
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
-        f'viewBox="0 0 {width} {height}">\n'
-        f"  <title>{title}</title>\n"
-        "  <desc>Embedded transparent PNG cutout, not vectorized SVG paths.</desc>\n"
-        f'  <image href="data:image/png;base64,{encoded_png}" width="{width}" height="{height}" />\n'
-        "</svg>\n"
+    drawing = svgwrite.Drawing(
+        filename=str(output_path),
+        size=(width, height),
+        viewBox=f"0 0 {width} {height}",
+        debug=False,
     )
-    output_path.write_text(svg, encoding="utf-8")
+    drawing.set_desc(
+        title=region.display_name,
+        desc="Embedded transparent PNG cutout, not vectorized SVG paths.",
+    )
+    drawing.add(
+        drawing.image(
+            href=f"data:image/png;base64,{encoded_png}",
+            insert=(0, 0),
+            size=(width, height),
+        )
+    )
+    drawing.save(pretty=True)
     return output_path
 
 

@@ -1,97 +1,108 @@
 from __future__ import annotations
 
-import tkinter as tk
 from pathlib import Path
-from tkinter import ttk
 from typing import Callable
+
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QHeaderView,
+    QLabel,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
 
 from batch_cutout_svg.models import ImageItem
 
 
-class ImageListPanel(ttk.Frame):
+class ImageListPanel(QWidget):
     def __init__(
         self,
-        master: tk.Misc,
         on_select: Callable[[Path], None],
+        parent: QWidget | None = None,
     ) -> None:
-        super().__init__(master)
+        super().__init__(parent)
         self.on_select = on_select
         self._suppress_selection_callback = False
 
-        ttk.Label(self, text="图片列表").pack(anchor="w", padx=8, pady=(8, 4))
-        columns = ("regions", "exported")
-        self.tree = ttk.Treeview(
-            self,
-            columns=columns,
-            show="tree headings",
-            selectmode="browse",
-            height=18,
-        )
-        self.tree.heading("#0", text="文件")
-        self.tree.heading("regions", text="区域")
-        self.tree.heading("exported", text="导出")
-        self.tree.column("#0", width=170, stretch=True)
-        self.tree.column("regions", width=48, anchor="center", stretch=False)
-        self.tree.column("exported", width=48, anchor="center", stretch=False)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+        layout.addWidget(QLabel("图片列表"))
 
-        scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scrollbar.set)
-        self.tree.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=(0, 8))
-        scrollbar.pack(side="right", fill="y", padx=(0, 8), pady=(0, 8))
-
-        self.tree.bind("<Button-1>", self._handle_click)
-        self.tree.bind("<<TreeviewSelect>>", self._handle_select)
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["文件", "区域", "导出"])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.itemSelectionChanged.connect(self._handle_select)
+        layout.addWidget(self.table, 1)
 
     def set_images(self, items: list[ImageItem]) -> None:
         current_selection = self.selected_path()
-        for iid in self.tree.get_children():
-            self.tree.delete(iid)
-        for item in items:
-            iid = str(item.path)
-            marker = "是" if item.exported else "否"
-            self.tree.insert(
-                "",
-                "end",
-                iid=iid,
-                text=item.file_name,
-                values=(str(len(item.regions)), marker),
-            )
-        if current_selection and str(current_selection) in self.tree.get_children():
-            self.select_path(current_selection, notify=False)
+        self._suppress_selection_callback = True
+        try:
+            self.table.setRowCount(0)
+            for item in items:
+                row = self.table.rowCount()
+                self.table.insertRow(row)
+                name_item = QTableWidgetItem(item.file_name)
+                name_item.setData(Qt.ItemDataRole.UserRole, str(item.path))
+                self.table.setItem(row, 0, name_item)
+                self.table.setItem(row, 1, _center_item(str(len(item.regions))))
+                self.table.setItem(row, 2, _center_item("是" if item.exported else "否"))
+            if current_selection is not None:
+                self.select_path(current_selection, notify=False)
+        finally:
+            QTimer.singleShot(10, self._clear_selection_suppression)
 
     def select_path(self, path: Path, notify: bool = True) -> None:
-        iid = str(path)
-        if iid not in self.tree.get_children():
+        row = self._row_for_path(path)
+        if row is None:
             return
         if not notify:
             self._suppress_selection_callback = True
-            try:
-                self.tree.selection_set(iid)
-                self.tree.focus(iid)
-                self.tree.see(iid)
-            finally:
-                self.after(10, self._clear_selection_suppression)
-        else:
-            self.tree.selection_set(iid)
-            self.tree.focus(iid)
-            self.tree.see(iid)
+        self.table.selectRow(row)
+        self.table.scrollToItem(self.table.item(row, 0))
+        if not notify:
+            QTimer.singleShot(10, self._clear_selection_suppression)
 
     def selected_path(self) -> Path | None:
-        selection = self.tree.selection()
-        if not selection:
+        selected_rows = self.table.selectionModel().selectedRows()
+        if not selected_rows:
             return None
-        return Path(selection[0])
+        item = self.table.item(selected_rows[0].row(), 0)
+        if item is None:
+            return None
+        value = item.data(Qt.ItemDataRole.UserRole)
+        return Path(str(value)) if value else None
 
-    def _handle_select(self, _event: tk.Event) -> None:
+    def _handle_select(self) -> None:
         if self._suppress_selection_callback:
             return
         selected = self.selected_path()
         if selected is not None:
             self.on_select(selected)
 
-    def _handle_click(self, _event: tk.Event) -> None:
-        self._clear_selection_suppression()
+    def _row_for_path(self, path: Path) -> int | None:
+        path_value = str(path)
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item is not None and item.data(Qt.ItemDataRole.UserRole) == path_value:
+                return row
+        return None
 
     def _clear_selection_suppression(self) -> None:
         self._suppress_selection_callback = False
 
+
+def _center_item(value: str) -> QTableWidgetItem:
+    item = QTableWidgetItem(value)
+    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+    return item

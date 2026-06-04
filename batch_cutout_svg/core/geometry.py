@@ -3,6 +3,9 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+from shapely.geometry import LineString, Point as ShapelyPoint, Polygon
+from shapely.validation import explain_validity
+
 Point = tuple[float, float]
 EPSILON = 1e-7
 
@@ -50,14 +53,8 @@ def ellipse_to_points(
 
 
 def polygon_area(points: list[Point]) -> float:
-    points = normalize_points(points)
-    if len(points) < 3:
-        return 0.0
-    total = 0.0
-    for index, current in enumerate(points):
-        nxt = points[(index + 1) % len(points)]
-        total += current[0] * nxt[1] - nxt[0] * current[1]
-    return abs(total) / 2.0
+    polygon = _polygon_or_none(points)
+    return 0.0 if polygon is None else float(abs(polygon.area))
 
 
 def bounding_box(points: list[Point]) -> tuple[float, float, float, float]:
@@ -76,36 +73,10 @@ def simplify_points(points: list[Point], tolerance: float = 1.5) -> list[Point]:
     if len(points) <= 3:
         return points
 
-    def point_line_distance(point: Point, start: Point, end: Point) -> float:
-        if distance(start, end) <= EPSILON:
-            return distance(point, start)
-        numerator = abs(
-            (end[0] - start[0]) * (start[1] - point[1])
-            - (start[0] - point[0]) * (end[1] - start[1])
-        )
-        return numerator / distance(start, end)
-
-    def rdp(items: list[Point]) -> list[Point]:
-        if len(items) <= 2:
-            return items
-        start, end = items[0], items[-1]
-        max_distance = -1.0
-        max_index = 0
-        for index in range(1, len(items) - 1):
-            candidate = point_line_distance(items[index], start, end)
-            if candidate > max_distance:
-                max_distance = candidate
-                max_index = index
-        if max_distance > tolerance:
-            left = rdp(items[: max_index + 1])
-            right = rdp(items[max_index:])
-            return left[:-1] + right
-        return [start, end]
-
-    simplified = rdp(points + [points[0]])
-    if simplified and distance(simplified[0], simplified[-1]) <= EPSILON:
-        simplified.pop()
-    return normalize_points(simplified)
+    ring = LineString(points + [points[0]])
+    simplified = ring.simplify(float(tolerance), preserve_topology=False)
+    simplified_points = [(float(x), float(y)) for x, y in simplified.coords]
+    return normalize_points(simplified_points)
 
 
 def validate_polygon(
@@ -120,22 +91,27 @@ def validate_polygon(
         return ValidationResult(False, "当前区域点数不足，请重新绘制。")
     if not polygon_inside_image(points, image_width, image_height):
         return ValidationResult(False, "当前区域超出图片边界。")
-    if has_self_intersection(points):
-        return ValidationResult(False, "当前曲线自交，请重新绘制。")
-    if polygon_area(points) < min_area:
+
+    polygon = _polygon_or_none(points)
+    if polygon is None:
+        return ValidationResult(False, "当前区域无法形成有效闭合多边形。")
+    if not polygon.is_valid:
+        reason = explain_validity(polygon)
+        return ValidationResult(False, f"当前曲线自交或无效，请重新绘制。{reason}")
+    if polygon.area < min_area:
         return ValidationResult(False, "当前区域面积过小。")
 
-    for old in existing_polygons or []:
-        old = normalize_points(old)
-        if not old:
+    for old_points in existing_polygons or []:
+        old_polygon = _polygon_or_none(old_points)
+        if old_polygon is None or old_polygon.is_empty:
             continue
-        if boundaries_intersect(points, old):
+        if polygon.boundary.intersects(old_polygon.boundary):
             return ValidationResult(False, "当前区域与已有区域边界交叉或重合。")
-        if polygon_contains_polygon(points, old):
-            return ValidationResult(False, "当前区域包含已有区域，第一版暂不支持包含关系。")
-        if polygon_contains_polygon(old, points):
-            return ValidationResult(False, "已有区域包含当前区域，第一版暂不支持包含关系。")
-        if polygons_overlap(points, old):
+        if polygon.contains(old_polygon):
+            return ValidationResult(False, "当前区域包含已有区域，当前版本暂不支持包含关系。")
+        if old_polygon.contains(polygon):
+            return ValidationResult(False, "已有区域包含当前区域，当前版本暂不支持包含关系。")
+        if polygon.intersection(old_polygon).area > EPSILON:
             return ValidationResult(False, "当前区域与已有区域重叠。")
 
     return ValidationResult(True)
@@ -147,42 +123,34 @@ def polygon_inside_image(points: list[Point], image_width: int, image_height: in
 
 def has_self_intersection(points: list[Point]) -> bool:
     points = normalize_points(points)
-    count = len(points)
-    if count < 4:
+    if len(points) < 4:
         return False
-    for i in range(count):
-        a1, a2 = points[i], points[(i + 1) % count]
-        for j in range(i + 1, count):
-            if abs(i - j) == 1:
-                continue
-            if i == 0 and j == count - 1:
-                continue
-            b1, b2 = points[j], points[(j + 1) % count]
-            if segments_intersect(a1, a2, b1, b2):
-                return True
-    return False
+    polygon = _polygon_or_none(points)
+    return polygon is not None and not polygon.is_valid
 
 
 def boundaries_intersect(first: list[Point], second: list[Point]) -> bool:
-    first = normalize_points(first)
-    second = normalize_points(second)
-    for i in range(len(first)):
-        a1, a2 = first[i], first[(i + 1) % len(first)]
-        for j in range(len(second)):
-            b1, b2 = second[j], second[(j + 1) % len(second)]
-            if segments_intersect(a1, a2, b1, b2):
-                return True
-    return False
+    first_polygon = _polygon_or_none(first)
+    second_polygon = _polygon_or_none(second)
+    if first_polygon is None or second_polygon is None:
+        return False
+    return bool(first_polygon.boundary.intersects(second_polygon.boundary))
 
 
 def polygons_overlap(first: list[Point], second: list[Point]) -> bool:
-    return any(point_in_polygon(point, second) for point in first) or any(
-        point_in_polygon(point, first) for point in second
-    )
+    first_polygon = _polygon_or_none(first)
+    second_polygon = _polygon_or_none(second)
+    if first_polygon is None or second_polygon is None:
+        return False
+    return first_polygon.intersection(second_polygon).area > EPSILON
 
 
 def polygon_contains_polygon(outer: list[Point], inner: list[Point]) -> bool:
-    return all(point_in_polygon(point, outer, include_boundary=False) for point in inner)
+    outer_polygon = _polygon_or_none(outer)
+    inner_polygon = _polygon_or_none(inner)
+    if outer_polygon is None or inner_polygon is None:
+        return False
+    return bool(outer_polygon.contains(inner_polygon))
 
 
 def point_in_polygon(
@@ -190,46 +158,17 @@ def point_in_polygon(
     polygon: list[Point],
     include_boundary: bool = False,
 ) -> bool:
-    polygon = normalize_points(polygon)
-    if len(polygon) < 3:
+    shape = _polygon_or_none(polygon)
+    if shape is None:
         return False
-    for index, start in enumerate(polygon):
-        end = polygon[(index + 1) % len(polygon)]
-        if point_on_segment(point, start, end):
-            return include_boundary
-
-    x, y = point
-    inside = False
-    previous = polygon[-1]
-    for current in polygon:
-        xi, yi = current
-        xj, yj = previous
-        crosses = (yi > y) != (yj > y)
-        if crosses:
-            x_intersection = (xj - xi) * (y - yi) / (yj - yi) + xi
-            if x < x_intersection:
-                inside = not inside
-        previous = current
-    return inside
+    shapely_point = ShapelyPoint(float(point[0]), float(point[1]))
+    if include_boundary:
+        return bool(shape.covers(shapely_point))
+    return bool(shape.contains(shapely_point))
 
 
 def segments_intersect(a1: Point, a2: Point, b1: Point, b2: Point) -> bool:
-    d1 = orientation(a1, a2, b1)
-    d2 = orientation(a1, a2, b2)
-    d3 = orientation(b1, b2, a1)
-    d4 = orientation(b1, b2, a2)
-
-    if d1 * d2 < -EPSILON and d3 * d4 < -EPSILON:
-        return True
-    if abs(d1) <= EPSILON and point_on_segment(b1, a1, a2):
-        return True
-    if abs(d2) <= EPSILON and point_on_segment(b2, a1, a2):
-        return True
-    if abs(d3) <= EPSILON and point_on_segment(a1, b1, b2):
-        return True
-    if abs(d4) <= EPSILON and point_on_segment(a2, b1, b2):
-        return True
-    return False
+    return bool(LineString([a1, a2]).intersects(LineString([b1, b2])))
 
 
 def orientation(a: Point, b: Point, c: Point) -> float:
@@ -237,13 +176,14 @@ def orientation(a: Point, b: Point, c: Point) -> float:
 
 
 def point_on_segment(point: Point, start: Point, end: Point) -> bool:
-    if abs(orientation(start, end, point)) > EPSILON:
-        return False
-    return (
-        min(start[0], end[0]) - EPSILON
-        <= point[0]
-        <= max(start[0], end[0]) + EPSILON
-        and min(start[1], end[1]) - EPSILON
-        <= point[1]
-        <= max(start[1], end[1]) + EPSILON
-    )
+    return bool(LineString([start, end]).distance(ShapelyPoint(point)) <= EPSILON)
+
+
+def _polygon_or_none(points: list[Point]) -> Polygon | None:
+    points = normalize_points(points)
+    if len(points) < 3:
+        return None
+    try:
+        return Polygon(points)
+    except (TypeError, ValueError):
+        return None

@@ -1,11 +1,25 @@
 from __future__ import annotations
 
 import traceback
-import tkinter as tk
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
 from typing import Callable
+
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtGui import QKeyEvent
+from PySide6.QtWidgets import (
+    QApplication,
+    QButtonGroup,
+    QFileDialog,
+    QHBoxLayout,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QRadioButton,
+    QSplitter,
+    QVBoxLayout,
+    QWidget,
+)
 
 from batch_cutout_svg.core.exporter import ExportFailure, ExportSummary, export_all, export_region_as_svg
 from batch_cutout_svg.core.geometry import Point, validate_polygon
@@ -26,39 +40,53 @@ from batch_cutout_svg.ui.region_panel import RegionPanel
 
 IMPORT_DEBUG_LOG = Path("import_debug.log")
 APP_ERRORS_LOG = Path("app_errors.log")
-IMAGE_FILETYPES = (
-    ("图片文件", ("*.png", "*.PNG", "*.jpg", "*.JPG", "*.jpeg", "*.JPEG")),
-    ("PNG", ("*.png", "*.PNG")),
-    ("JPEG", ("*.jpg", "*.JPG", "*.jpeg", "*.JPEG")),
-    ("所有文件", "*.*"),
+IMAGE_FILTER = (
+    "图片文件 (*.png *.PNG *.jpg *.JPG *.jpeg *.JPEG);;"
+    "PNG (*.png *.PNG);;"
+    "JPEG (*.jpg *.JPG *.jpeg *.JPEG);;"
+    "所有文件 (*.*)"
 )
 
 
-class MainWindow(tk.Tk):
+class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.title("批量闭合区域抠图导出 SVG")
-        self.geometry("1280x800")
-        self.minsize(980, 640)
+        self.setWindowTitle("批量闭合区域抠图导出 SVG")
+        self.resize(1280, 800)
+        self.setMinimumSize(980, 640)
 
         self.images: list[ImageItem] = []
         self.current_image: ImageItem | None = None
         self.selected_region_id: str | None = None
         self._checked_region_ids_by_image: dict[str, set[str]] = {}
-        self.status_var = tk.StringVar(value="导入图片后开始绘制区域。")
-        self.tool_var = tk.StringVar(value=TOOL_RECT)
+        self._current_tool = TOOL_RECT
 
-        self._build_toolbar()
-        self._build_layout()
-        self._build_statusbar()
-        self.bind("<Escape>", lambda _event: self.select_region(None))
+        central = QWidget()
+        root = QVBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        self.setCentralWidget(central)
 
-    def _build_toolbar(self) -> None:
-        toolbar = ttk.Frame(self, padding=(8, 6))
-        toolbar.pack(side="top", fill="x")
-        ttk.Button(toolbar, text="导入图片", command=self.import_images).pack(side="left")
-        ttk.Button(toolbar, text="导入文件夹", command=self.import_folder).pack(side="left", padx=(6, 16))
+        self._build_toolbar(root)
+        self._build_layout(root)
+        self._set_status("导入图片后开始绘制区域。")
 
+    def _build_toolbar(self, root: QVBoxLayout) -> None:
+        toolbar = QWidget()
+        layout = QHBoxLayout(toolbar)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(8)
+
+        import_button = QPushButton("导入图片")
+        import_button.clicked.connect(self.import_images)
+        layout.addWidget(import_button)
+
+        import_folder_button = QPushButton("导入文件夹")
+        import_folder_button.clicked.connect(self.import_folder)
+        layout.addWidget(import_folder_button)
+
+        self.tool_group = QButtonGroup(self)
+        self.tool_group.setExclusive(True)
         for label, tool in (
             ("选择", TOOL_SELECT),
             ("手形", TOOL_HAND),
@@ -66,29 +94,31 @@ class MainWindow(tk.Tk):
             ("椭圆", TOOL_ELLIPSE),
             ("自由曲线", TOOL_FREEHAND),
         ):
-            ttk.Radiobutton(
-                toolbar,
-                text=label,
-                value=tool,
-                variable=self.tool_var,
-                command=self._tool_changed,
-            ).pack(side="left", padx=2)
+            button = QRadioButton(label)
+            button.setChecked(tool == self._current_tool)
+            button.toggled.connect(lambda checked, value=tool: self._tool_changed(value) if checked else None)
+            self.tool_group.addButton(button)
+            layout.addWidget(button)
 
-        ttk.Button(toolbar, text="适应窗口", command=lambda: self.canvas_view.fit_to_window()).pack(
-            side="left",
-            padx=(16, 6),
-        )
-        ttk.Button(toolbar, text="删除区域", command=self.delete_selected_region).pack(side="left")
-        ttk.Button(toolbar, text="导出全部", command=self.export_all_regions).pack(side="right")
+        fit_button = QPushButton("适应窗口")
+        fit_button.clicked.connect(lambda: self.canvas_view.fit_to_window())
+        layout.addWidget(fit_button)
 
-    def _build_layout(self) -> None:
-        panes = ttk.PanedWindow(self, orient="horizontal")
-        panes.pack(fill="both", expand=True)
+        delete_button = QPushButton("删除区域")
+        delete_button.clicked.connect(self.delete_selected_region)
+        layout.addWidget(delete_button)
 
-        self.image_list = ImageListPanel(panes, self.select_image)
-        self.canvas_view = CanvasView(panes, self.add_drawn_region, self.select_region, self.move_region)
+        layout.addStretch(1)
+        export_all_button = QPushButton("导出全部")
+        export_all_button.clicked.connect(self.export_all_regions)
+        layout.addWidget(export_all_button)
+        root.addWidget(toolbar)
+
+    def _build_layout(self, root: QVBoxLayout) -> None:
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.image_list = ImageListPanel(self.select_image)
+        self.canvas_view = CanvasView(self.add_drawn_region, self.select_region, self.move_region)
         self.region_panel = RegionPanel(
-            panes,
             on_select=self.select_region,
             on_rename=self.rename_selected_region,
             on_toggle_visible=self.toggle_selected_region_visible,
@@ -99,27 +129,28 @@ class MainWindow(tk.Tk):
             on_export=self.export_all_regions,
         )
 
-        panes.add(self.image_list, weight=1)
-        panes.add(self.canvas_view, weight=5)
-        panes.add(self.region_panel, weight=2)
-
-    def _build_statusbar(self) -> None:
-        status = ttk.Label(self, textvariable=self.status_var, anchor="w", padding=(8, 4))
-        status.pack(side="bottom", fill="x")
+        splitter.addWidget(self.image_list)
+        splitter.addWidget(self.canvas_view)
+        splitter.addWidget(self.region_panel)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 5)
+        splitter.setStretchFactor(2, 2)
+        root.addWidget(splitter, 1)
 
     def import_images(self) -> None:
-        raw_paths = filedialog.askopenfilenames(
-            title="选择图片",
-            filetypes=IMAGE_FILETYPES,
+        raw_paths, _selected_filter = QFileDialog.getOpenFileNames(
+            self,
+            "选择图片",
+            "",
+            IMAGE_FILTER,
         )
-        paths = _coerce_dialog_paths(raw_paths, self.tk.splitlist)
+        paths = _coerce_dialog_paths(raw_paths)
         self._log_import(f"dialog selected {len(paths)} path(s):\n{paths!r}")
-        if not paths:
-            return
-        self._load_paths(paths)
+        if paths:
+            self._load_paths(paths)
 
     def import_folder(self) -> None:
-        folder = filedialog.askdirectory(title="选择图片文件夹")
+        folder = QFileDialog.getExistingDirectory(self, "选择图片文件夹")
         if not folder:
             return
         try:
@@ -127,10 +158,10 @@ class MainWindow(tk.Tk):
             self._log_import(f"folder selected: {folder!r}\ndiscovered {len(paths)} image path(s)")
         except Exception as exc:  # noqa: BLE001 - show folder access errors to user.
             self._log_import(f"folder import failed: {folder!r}\n{exc}")
-            messagebox.showerror("导入失败", str(exc))
+            QMessageBox.critical(self, "导入失败", str(exc))
             return
         if not paths:
-            messagebox.showinfo("没有图片", "所选文件夹中没有 png/jpg/jpeg 图片。")
+            QMessageBox.information(self, "没有图片", "所选文件夹中没有 png/jpg/jpeg 图片。")
             return
         self._load_paths(paths)
 
@@ -140,8 +171,9 @@ class MainWindow(tk.Tk):
         new_paths = [path for path in paths if self._path_key(path) not in existing]
         self._log_import(f"new paths after de-dupe {len(new_paths)}:\n{new_paths!r}")
         if not new_paths:
-            self.status_var.set("选中的图片已经在列表中。")
+            self._set_status("选中的图片已经在列表中。")
             return
+
         result = load_images_with_report(new_paths)
         self._log_import(
             "loaded "
@@ -150,34 +182,26 @@ class MainWindow(tk.Tk):
         )
         if not result.items:
             details = self._format_load_failures(result.failures)
-            messagebox.showerror("导入失败", details or "没有可导入的图片。")
-            self.status_var.set("图片导入失败。")
+            QMessageBox.critical(self, "导入失败", details or "没有可导入的图片。")
+            self._set_status("图片导入失败。")
             return
+
         loaded = result.items
-        self._log_import("before extend images")
         self.images.extend(loaded)
-        self._log_import("after extend images")
-        self._log_import("before image_list.set_images")
         self.image_list.set_images(self.images)
-        self._log_import("after image_list.set_images")
-        if loaded:
-            first_path = loaded[0].path
-            self._log_import(f"before image_list.select_path: {first_path}")
-            self.image_list.select_path(first_path, notify=False)
-            self._log_import("after image_list.select_path")
-            self.status_var.set("图片已读取，正在准备预览...")
-            self._log_import(f"before delayed select_image schedule: {first_path}")
-            self.after(10, lambda path=first_path: self.select_image(path))
-            self._log_import("after delayed select_image schedule")
+        first_path = loaded[0].path
+        self.image_list.select_path(first_path, notify=False)
+        self._set_status("图片已读取，正在准备预览...")
+        QTimer.singleShot(0, lambda path=first_path: self.select_image(path))
+
         if result.failures:
             details = self._format_load_failures(result.failures)
-            messagebox.showwarning(
+            QMessageBox.warning(
+                self,
                 "部分图片导入失败",
                 f"成功导入 {len(loaded)} 张，失败 {len(result.failures)} 张。\n\n{details}",
             )
-            self.status_var.set(f"已导入 {len(loaded)} 张图片，{len(result.failures)} 张失败。")
-        elif not loaded:
-            self.status_var.set(f"已导入 {len(loaded)} 张图片。")
+            self._set_status(f"已导入 {len(loaded)} 张图片，{len(result.failures)} 张失败。")
 
     def select_image(self, path: Path) -> None:
         self._log_import(f"select_image start: {path}")
@@ -187,16 +211,12 @@ class MainWindow(tk.Tk):
             return
         self.current_image = image
         self.selected_region_id = None
-        self._log_import("before canvas_view.set_image_item")
         self.canvas_view.set_image_item(image)
-        self._log_import("after canvas_view.set_image_item")
-        self._log_import("before region_panel.set_regions")
         self.region_panel.set_regions(
             image.regions,
             None,
             checked_region_ids=self._checked_region_ids_for(image),
         )
-        self._log_import("after region_panel.set_regions")
         self._update_status()
         self._log_import("select_image done")
 
@@ -211,8 +231,8 @@ class MainWindow(tk.Tk):
             existing_polygons=existing_polygons,
         )
         if not validation.is_valid:
-            messagebox.showwarning("区域非法", validation.error_message or "当前区域非法。")
-            self.status_var.set(validation.error_message or "区域非法。")
+            QMessageBox.warning(self, "区域非法", validation.error_message or "当前区域非法。")
+            self._set_status(validation.error_message or "区域非法。")
             return False
 
         region_id = next_available_region_id(region.id for region in self.current_image.regions)
@@ -275,7 +295,7 @@ class MainWindow(tk.Tk):
             existing_polygons=existing_polygons,
         )
         if not validation.is_valid:
-            self.status_var.set(validation.error_message or "区域移动后非法。")
+            self._set_status(validation.error_message or "区域移动后非法。")
             return False
 
         _translate_region(region, dx, dy, moved_points=moved_points)
@@ -304,7 +324,7 @@ class MainWindow(tk.Tk):
             return
         region_id = self.selected_region_id or self.region_panel.selected_region_id()
         if region_id is None:
-            self.status_var.set("请先选择要删除的区域。")
+            self._set_status("请先选择要删除的区域。")
             return
         checked_ids = set(self._checked_region_ids_for_current())
         self.current_image.regions = [
@@ -317,17 +337,17 @@ class MainWindow(tk.Tk):
         self._refresh_regions()
 
     def browse_output_dir(self) -> None:
-        folder = filedialog.askdirectory(title="选择导出目录")
+        folder = QFileDialog.getExistingDirectory(self, "选择导出目录")
         if folder:
             self.region_panel.set_output_dir(folder)
 
     def export_all_regions(self) -> None:
         if not self.images:
-            messagebox.showinfo("没有图片", "请先导入图片并绘制区域。")
+            QMessageBox.information(self, "没有图片", "请先导入图片并绘制区域。")
             return
         total_regions = sum(len(image.regions) for image in self.images)
         if total_regions == 0:
-            messagebox.showinfo("没有区域", "请先绘制至少一个闭合区域。")
+            QMessageBox.information(self, "没有区域", "请先绘制至少一个闭合区域。")
             return
         output_dir = self._ensure_output_dir()
         if output_dir is None:
@@ -335,8 +355,8 @@ class MainWindow(tk.Tk):
 
         def update_progress(done: int, total: int) -> None:
             self.region_panel.set_progress(done, total)
-            self.status_var.set(f"正在导出 {done}/{total} ...")
-            self.update_idletasks()
+            self._set_status(f"正在导出 {done}/{total} ...")
+            QApplication.processEvents()
 
         summary = export_all(
             self.images,
@@ -350,7 +370,7 @@ class MainWindow(tk.Tk):
 
     def export_checked_regions(self) -> None:
         if self.current_image is None:
-            messagebox.showinfo("没有图片", "请先导入图片并选择要导出的区域。")
+            QMessageBox.information(self, "没有图片", "请先导入图片并选择要导出的区域。")
             return
         checked_ids = self._checked_region_ids_for_current()
         selected_regions = [
@@ -359,7 +379,7 @@ class MainWindow(tk.Tk):
             if region.id in checked_ids
         ]
         if not selected_regions:
-            messagebox.showinfo("没有选中区域", "请先在右侧区域列表中勾选要导出的区域。")
+            QMessageBox.information(self, "没有选中区域", "请先在右侧区域列表中勾选要导出的区域。")
             return
         output_dir = self._ensure_output_dir()
         if output_dir is None:
@@ -391,13 +411,20 @@ class MainWindow(tk.Tk):
                     )
                 )
             self.region_panel.set_progress(done, total)
-            self.status_var.set(f"正在导出选中区域 {done}/{total} ...")
-            self.update_idletasks()
+            self._set_status(f"正在导出选中区域 {done}/{total} ...")
+            QApplication.processEvents()
 
         if summary.success_count:
             self.current_image.exported = True
         self._restore_editing_state_after_export()
         self._show_export_summary(summary, "选中区域导出完成")
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802 - Qt override.
+        if event.key() == Qt.Key.Key_Escape:
+            self.select_region(None)
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def _show_export_summary(self, summary: ExportSummary, success_title: str) -> None:
         if summary.failures:
@@ -407,26 +434,28 @@ class MainWindow(tk.Tk):
             )
             if len(summary.failures) > 10:
                 details += f"\n... 还有 {len(summary.failures) - 10} 项失败"
-            messagebox.showwarning(
+            QMessageBox.warning(
+                self,
                 "导出完成但有失败项",
                 f"成功 {summary.success_count} 个，失败 {summary.failure_count} 个。\n\n{details}",
             )
         else:
-            messagebox.showinfo(success_title, f"成功导出 {summary.success_count} 个 SVG。")
+            QMessageBox.information(self, success_title, f"成功导出 {summary.success_count} 个 SVG。")
 
     def _ensure_output_dir(self) -> str | None:
         output_dir = self.region_panel.output_dir()
         if output_dir:
             return output_dir
-        folder = filedialog.askdirectory(title="选择导出目录")
+        folder = QFileDialog.getExistingDirectory(self, "选择导出目录")
         if not folder:
             return None
         self.region_panel.set_output_dir(folder)
         return folder
 
-    def _tool_changed(self) -> None:
-        self.canvas_view.set_tool(self.tool_var.get())
-        self.status_var.set(f"当前工具: {self._tool_label(self.tool_var.get())}")
+    def _tool_changed(self, tool: str) -> None:
+        self._current_tool = tool
+        self.canvas_view.set_tool(tool)
+        self._set_status(f"当前工具: {self._tool_label(tool)}")
 
     def _selected_region(self) -> Region | None:
         if self.current_image is None:
@@ -476,7 +505,7 @@ class MainWindow(tk.Tk):
             self.selected_region_id,
             checked_region_ids=self._checked_region_ids_for_current(),
         )
-        self.update_idletasks()
+        QApplication.processEvents()
         self._update_status()
 
     def _checked_region_ids_for_current(self) -> set[str]:
@@ -495,26 +524,18 @@ class MainWindow(tk.Tk):
 
     def _update_status(self) -> None:
         if self.current_image is None:
-            self.status_var.set("导入图片后开始绘制区域。")
+            self._set_status("导入图片后开始绘制区域。")
             return
         region = self._selected_region()
         selected = f"，选中 {region.display_name}" if region else ""
-        self.status_var.set(
+        self._set_status(
             f"当前图片: {self.current_image.file_name}，"
             f"{self.current_image.width}x{self.current_image.height}，"
             f"区域 {len(self.current_image.regions)} 个{selected}"
         )
 
-    def report_callback_exception(self, exc_type: type[BaseException], exc: BaseException, tb) -> None:
-        details = "".join(traceback.format_exception(exc_type, exc, tb))
-        _append_log(APP_ERRORS_LOG, f"Tk callback exception:\n{details}")
-        try:
-            messagebox.showerror(
-                "程序错误",
-                f"界面回调发生异常，详情已写入 {APP_ERRORS_LOG}。\n\n{exc}",
-            )
-        except tk.TclError:
-            pass
+    def _set_status(self, message: str) -> None:
+        self.statusBar().showMessage(message)
 
     @staticmethod
     def _log_import(message: str) -> None:
@@ -610,6 +631,16 @@ def _translate_numeric_field(data: dict, key: str, delta: float) -> None:
         data[key] = value + delta
 
 
+def log_unhandled_exception(exc_type: type[BaseException], exc: BaseException, tb) -> None:
+    details = "".join(traceback.format_exception(exc_type, exc, tb))
+    _append_log(APP_ERRORS_LOG, f"Qt callback exception:\n{details}")
+    QMessageBox.critical(
+        None,
+        "程序错误",
+        f"界面回调发生异常，详情已写入 {APP_ERRORS_LOG}。\n\n{exc}",
+    )
+
+
 def _append_log(path: Path, message: str) -> None:
     try:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -617,4 +648,3 @@ def _append_log(path: Path, message: str) -> None:
             handle.write(f"[{timestamp}] {message}\n\n")
     except OSError:
         pass
-

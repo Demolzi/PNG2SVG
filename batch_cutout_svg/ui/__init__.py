@@ -1,2 +1,1 @@
-"""Tkinter user interface for the first desktop version."""
-
+"""PySide6 desktop user interface."""
