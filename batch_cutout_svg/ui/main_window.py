@@ -568,10 +568,13 @@ def _coerce_dialog_paths(
 
 
 def _absolute_path(path: Path) -> Path:
+    expanded = path.expanduser()
+    if not expanded.is_absolute():
+        expanded = Path.cwd() / expanded
     try:
-        return path.expanduser().resolve(strict=False)
+        return expanded.resolve(strict=False)
     except OSError:
-        return path.expanduser().absolute()
+        return expanded.absolute()
 
 
 def _translate_region(
